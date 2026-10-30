@@ -68,7 +68,6 @@ from unicorn import (UC_HOOK_CODE, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE,
 from unicorn.m68k_const import UC_M68K_REG_PC
 
 from . import symtab
-from .memory import ADDRESS_MASK
 from .toolbox.events import EventRecord
 from .toolbox.types import Point
 
@@ -455,7 +454,7 @@ class FunctionPatcher:
         """A 68k access that reached the watched address: record it.  Runs
         inside unicorn, mid-instruction, on the guest thread -- read the
         PC and, if set, run the handler, but don't stop the core."""
-        pc = uc.reg_read(UC_M68K_REG_PC) & ADDRESS_MASK
+        pc = uc.reg_read(UC_M68K_REG_PC) & self.mem.addr_mask
         kind = "write" if access == UC_MEM_WRITE else "read"
         ghidra_pc = self.app_map.ghidra_at(pc)
         with self._qlock:
@@ -605,7 +604,7 @@ class FunctionPatcher:
             setter = self.cpu.set_a if fmt == "p" else self.cpu.set_d
             setter(0, _encode_result(fmt, value))
         self.cpu.sp = sp + 4 + fh.rtd
-        self.cpu.pc = retpc & ADDRESS_MASK
+        self.cpu.pc = retpc & self.mem.addr_mask
         hook.skipped = True
 
     # -- calling 68k code back ------------------------------------------------------
