@@ -17,10 +17,11 @@ Built on the SDK's MCPServer, whose StreamableHTTP transport does the wire,
 the handshake and the schema.  What's here is the tools and how they reach a
 running emulator:
 
-  * The server is stateless and answers each request with one JSON body.  The
-    emulator is one machine and its state is read when asked about, not pushed
-    as it changes, so there's nothing a session or an event stream would carry.
-    It's also what lets two clients look at the same game.
+  * The server answers each request with one JSON body.  The emulator is one
+    machine and its state is read when asked about, not pushed as it changes,
+    so nothing a session or an event stream would carry is carried: the
+    session id exists only so a connect and a disconnect can be seen, and two
+    clients can still look at the same game, each with its own.
 
   * Each tool is a method on Tools.  Its docstring is what the client reads,
     and its Annotated parameters carry the descriptions -- so the schema and
@@ -453,15 +454,90 @@ def reported(fn):
     keeps the real message on the server, which is right for a crash and wrong
     for this: `ram:0012ABCD isn't loaded right now`, `no trap called Nonesuch`
     and `the game is running its own code` are the answer the client came for.
-    So each failure is handed back as an error result carrying its own words."""
+    So each failure is handed back as an error result carrying its own words.
+
+    Every request, and its answer, is also written into the debugger window's
+    log when one is open: the client's side of the same conversation a typed
+    command logs, so what came over the socket can be read where the machine
+    stopped.  Posted to the GUI thread -- the window is a widget, and this
+    thread is not it -- and dropped rather than raised if there's no window,
+    or it's already gone."""
     @functools.wraps(fn)           # keeps the name, the docstring, the annotations
     def run(*args, **kwargs):
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
         except Exception as e:                                   # noqa: BLE001
             log.info("%s: %s", fn.__name__, e)
-            return _error(f"{type(e).__name__}: {e}")
+            result = _error(f"{type(e).__name__}: {e}")
+        # fn is the bound method the tool was registered as, so its Tools is
+        # what the display is, and the window to log into.  A bound method
+        # carries its owner as __self__, not self.
+        _to_the_debugger(getattr(fn, "__self__", None), _task_of(fn, args, kwargs), result)
+        return result
     return run
+
+
+def _task_of(fn, args, kwargs) -> str:
+    """The request as it was made: the tool's arguments, in the order the
+    schema lists them.  A tool's signature is its interface, so its parameters
+    say what was asked for; the SDK hands over whatever the client sent, and
+    what it didn't send is the parameter's own default."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return fn.__name__
+    # p.kind's name, not the enum: 3.14 took the public ParameterKind alias
+    # away, and the names are the same in every version.
+    name = {p: v for p, v in kwargs.items() if p in params}
+    for p in params.values():
+        if p.name in name or p.kind.name == "VAR_POSITIONAL":
+            continue
+        if p.kind.name == "VAR_KEYWORD":
+            name.update(kwargs)
+            continue
+        if args:
+            name[p.name] = args[0]
+            args = args[1:]
+        elif p.default is not inspect.Parameter.empty:
+            name[p.name] = p.default
+    return " ".join(f"{n}={v!r}" for n, v in name.items())
+
+
+def _to_the_debugger(tools, task: str, result) -> None:
+    """The request and its answer into the debugger window's log, or nothing
+    if there's no window.  `display.debugger` is set the moment the window is
+    made and cleared by Qt when it goes away, so a read of it here is the
+    question of whether there is one.  The window is a widget, and this thread
+    is not the GUI's, so the line is posted rather than written; a window
+    already gone is dropped rather than raised -- a log line is no reason to
+    fail the answer it's about."""
+    display = tools.display
+    window = getattr(display, "debugger", None)
+    if window is None:
+        return
+    bridge = getattr(display, "bridge", None)
+    try:
+        if bridge is None:
+            window.mcp_log(task, _answer(result))
+        else:
+            bridge.post(window.mcp_log, task, _answer(result))
+    except Exception:                                          # noqa: BLE001
+        pass
+
+
+def _answer(result) -> str:
+    """What the tool said, as a line: its words, joined.  An error result
+    carries them in its content, which is where they are read from; a plain
+    value is itself the answer."""
+    from mcp.types import CallToolResult
+    if isinstance(result, CallToolResult):
+        parts = []
+        for c in result.content:
+            if getattr(c, "type", None) == "text" and c.text:
+                parts.append(c.text)
+        return "\n".join(parts) if parts else "(no answer)"
+    return str(result)
 
 
 def _error(text: str):
@@ -591,14 +667,25 @@ class McpServer:
         if self.started:
             return self.url
         try:
+            # Stateful, not stateless: a session id on the first answer is
+            # what says a client is connected, and the DELETE it sends on
+            # close is what says it's gone -- with no session there is no
+            # connect to see and no disconnect to see, only a run of
+            # indistinguishable POSTs.  Each request still gets its one
+            # JSON body back; the client carries the id it was given.
             app = self.server.streamable_http_app(
-                streamable_http_path=PATH, stateless_http=True, json_response=True,
+                streamable_http_path=PATH, json_response=True,
                 host=self.host, transport_security=_security(self.host))
         except ImportError as e:                       # the SDK, or uvicorn, missing
             log.error("the MCP server needs the mcp package: %s", e)
             log.error("install it with:  pip install mcp")
             return ""
         import uvicorn
+        # The client's traffic, into the debugger window's log: a connect is
+        # the first request that carries no session id yet, and a disconnect
+        # the DELETE that takes the session down -- the window's log is where
+        # what came over the socket is read, and this is what came in.
+        app = _watched(app, self._say)
         # uvicorn's noise is the server's own setting, as it is when the SDK
         # runs itself.  WARNING by default (in build()): the emulator has one log
         # and nobody wants "Application startup complete" between the game's
@@ -617,6 +704,10 @@ class McpServer:
             return ""
         self.port = self._listening_port()
         self.started = True
+        # The first line of the conversation, into the debugger window's log
+        # when there is one: what is listening, and where -- so the window
+        # says why a client will be able to reach it, before any of them does.
+        self._say(f"mcp: listening on {self.url}")
         # Said as the thing to paste, because that's what happens next: the
         # client's config wants this exact stanza, and the port is the one that
         # was actually bound rather than the one asked for (which matters when
@@ -657,6 +748,23 @@ class McpServer:
             for s in getattr(sock, "sockets", []) or []:
                 return s.getsockname()[1]
         return self.port
+
+    def _say(self, line: str) -> None:
+        """A line into the debugger window's log, or nowhere if there's no
+        window.  The server's thread isn't the GUI's, so it's posted; a
+        window already gone is dropped rather than raised -- a log line is
+        no reason to fail the traffic it's about."""
+        window = getattr(self.display, "debugger", None)
+        if window is None:
+            return
+        bridge = getattr(self.display, "bridge", None)
+        try:
+            if bridge is None:
+                window.mcp_log(line, "")
+            else:
+                bridge.post(window.mcp_log, line, "")
+        except Exception:                                          # noqa: BLE001
+            pass
 
     def stop(self) -> None:
         """Stop listening, and wait briefly for the thread to finish.  A tool
@@ -702,6 +810,67 @@ def _security(host: str):
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
+def _watched(app, say) -> Any:
+    """The SDK's app, with the client's traffic said into the debugger log.
+
+    A client connects with its first request, which carries no session id
+    yet, and disconnects with the DELETE that takes its session down; the
+    server is stateful for no more than that -- the id is what makes the two
+    moments visible, and every other request is traffic of a client already
+    said, and says nothing.  The body is read on the way through and handed
+    back in a new message, so the SDK sees it once and only once.  A request
+    that dies on its way in -- a 421 for a web page that resolved localhost
+    to this port -- is still said: it reached the door, and the log is where
+    the door is watched."""
+    async def watched(scope, receive, send):
+        if scope.get("type") != "http":
+            await app(scope, receive, send)
+            return
+        method = scope.get("method", "")
+        body = b""
+        if method == "POST":
+            while True:
+                message = await receive()
+                if message.get("type") == "http.disconnect":
+                    break
+                body += message.get("body", b"")
+                if not message.get("more_body", False):
+                    break
+        session = _session_header(scope)
+        if method == "POST" and not session:
+            say(f"mcp: client connected ({_client_of(scope)})")
+        elif method == "DELETE" and session:
+            say(f"mcp: client disconnected ({_client_of(scope)})")
+        # The body, handed back as one message; whatever comes after it --
+        # the SDK asks receive() again on its stream paths -- goes to the
+        # original, so a disconnect still arrives as a disconnect.
+        sent = False
+
+        async def receive_back():
+            nonlocal sent
+            if not sent:
+                sent = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+        await app(scope, receive_back, send)
+    return watched
+
+
+def _session_header(scope) -> str:
+    """The session id the request carries, or "" for none: the first request
+    of a connection has no id yet, and that's what says a client has arrived."""
+    for key, value in scope.get("headers", []):
+        if key == b"mcp-session-id":
+            return value.decode("latin-1").strip()
+    return ""
+
+
+def _client_of(scope) -> str:
+    """Who it was, as far as a localhost socket says: the client's address."""
+    client = scope.get("client")
+    return f"{client[0]}:{client[1]}" if client else "unknown"
+
+
 def _grab_png(display) -> bytes:
     """The emulated screen as PNG bytes.  On the GUI thread, via gui(): it's a
     widget's pixels being asked for.

@@ -311,13 +311,18 @@ class Display(QObject):
             self.screen_widget = self.host_window.screen_widget
             # The other screens, their gdRects side by side with the main
             # screen's in the host too, so a host point is a Mac global.
+            # Whichever side of the main screen a gdRect is on, that's
+            # where its widget goes: left of it for negative x.
             self.extra_screens: list[ExtraScreen] = []
             for i in range(len(self.system.screen.extra)):
                 buffer = self.system.screen.extra[i]
                 extra = ExtraScreen(self.system.screen, i,
                                     (buffer.bounds.width, buffer.bounds.height),
                                     self.host_window)
-                self.host_window.layout().addWidget(extra)
+                if buffer.bounds.left < 0:
+                    self.host_window.layout().insertWidget(0, extra)
+                else:
+                    self.host_window.layout().addWidget(extra)
                 self.extra_screens.append(extra)
                 self.system.screen.on_extra_desk.append(
                     lambda box, i=i: self.bridge.post(self._extra_desk_drawn, i, box))

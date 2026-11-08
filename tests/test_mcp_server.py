@@ -589,9 +589,10 @@ def test_a_body_that_isnt_json_rpc_is_refused(server):
 
 def test_an_unknown_method_is_named(server):
     mcp = server.mcp
-    _post(mcp.url, _initialize())
+    sid = _session_id(mcp.url)
     status, answer = _post(mcp.url, {"jsonrpc": "2.0", "id": 9,
-                                     "method": "things/happen"})
+                                     "method": "things/happen"},
+                           headers={"mcp-session-id": sid})
     assert status == 200
     assert answer["error"]["code"] == -32601
     assert answer["error"]["data"] == "things/happen"
@@ -601,9 +602,10 @@ def test_an_unknown_tool_is_an_error_result_the_client_can_read(server):
     """A tool that isn't there is a failed call rather than a failed transport,
     so a client that guessed a name finds out which one and carries on."""
     mcp = server.mcp
-    _post(mcp.url, _initialize())
+    sid = _session_id(mcp.url)
     status, answer = _post(mcp.url, {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
-                                     "params": {"name": "frob", "arguments": {}}})
+                                     "params": {"name": "frob", "arguments": {}}},
+                           headers={"mcp-session-id": sid})
     assert status == 200 and answer["result"]["isError"] is True
     assert "frob" in answer["result"]["content"][0]["text"]
 
@@ -612,8 +614,10 @@ def test_notifications_are_accepted_and_answered_nothing(server):
     """A notification is said, not asked: no id, and nothing comes back but an
     accepted."""
     mcp = server.mcp
+    sid = _session_id(mcp.url)
     status, body = _post(mcp.url, {"jsonrpc": "2.0",
-                                   "method": "notifications/initialized"})
+                                   "method": "notifications/initialized"},
+                         headers={"mcp-session-id": sid})
     assert status == 202 and body is None
 
 
@@ -621,11 +625,13 @@ def test_resources_and_prompts_are_answered_as_having_none(server):
     """The server has neither, and says so in the shape asked for rather than
     with a method-not-found some clients read as a broken server."""
     mcp = server.mcp
-    _post(mcp.url, _initialize())
+    sid = _session_id(mcp.url)
     assert _post(mcp.url, {"jsonrpc": "2.0", "id": 1,
-                           "method": "resources/list"})[1]["result"] == {"resources": []}
+                           "method": "resources/list"},
+                 headers={"mcp-session-id": sid})[1]["result"] == {"resources": []}
     assert _post(mcp.url, {"jsonrpc": "2.0", "id": 2,
-                           "method": "prompts/list"})[1]["result"] == {"prompts": []}
+                           "method": "prompts/list"},
+                 headers={"mcp-session-id": sid})[1]["result"] == {"prompts": []}
 
 
 def test_the_url_is_the_one_the_config_says(server):
@@ -645,8 +651,11 @@ def test_a_get_is_an_open_stream_and_not_a_way_to_read_state(server):
     rather than answering 405 and making a client that probes with one give up.
     Nothing is read or changed by it, which is what's checked."""
     mcp, display = server.mcp, server.display
+    # A stream is a session's, so the GET carries the one it belongs to.
     status, _ = _post(mcp.url, None, method="GET",
-                      headers={"Accept": "text/event-stream"}, timeout=2)
+                      headers={"Accept": "text/event-stream",
+                               "mcp-session-id": _session_id(mcp.url)},
+                      timeout=2)
     assert status == "open", status            # opened and stayed open
     assert display.processes == []             # and nothing happened
     assert _post(mcp.url, _initialize())[0] == 200      # and the server still answers
@@ -777,6 +786,18 @@ def _post(url, payload, headers=None, raw=None, method="POST", timeout=8):
         return e.code, _json(e.read())
     except TimeoutError:
         return "open", None
+
+
+def _session_id(url) -> str:
+    """Open a session the way a client does -- POST `initialize`, no session
+    id yet -- and come back with the one the server answers with.  The server
+    is stateful: a request that isn't the first of a session has to carry it,
+    and this is where a raw-HTTP test gets it."""
+    request = urllib.request.Request(url, data=json.dumps(_initialize()).encode(),
+                                     headers={"Content-Type": "application/json",
+                                              "Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=8) as reply:
+        return reply.headers.get("mcp-session-id", "")
 
 
 def _json(body: bytes):

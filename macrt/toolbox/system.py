@@ -494,8 +494,11 @@ class System:
                                 room=self.screen_room, screens=self.screens)
                         if self.model.color else None)
         self.open_wmgr_port()
-        mem.w32(lowmem.GrayRgn, new_rgn(self.sys_heap,
-                                        Rect(desk_top, 0, h, w * self.screens)))
+        # GrayRgn spans the desktop the screens' gdRects make: side
+        # screens reach negative to the main screen's left (Devices).
+        mem.w32(lowmem.GrayRgn, new_rgn(
+            self.sys_heap,
+            Rect(desk_top, -w if self.screens > 1 else 0, h, w * max(self.screens - 1, 1))))
         self.files = FileSystem(self)
         self.fcbs = self.files.fcbs                     # open files, by reference number
         self._open_system_file(system_file, disk_system, disk_fonts)

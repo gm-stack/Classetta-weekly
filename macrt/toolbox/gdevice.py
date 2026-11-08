@@ -339,13 +339,18 @@ class Devices:
         self.screens = [self.main]
         prev = self.main
         # The other screens' cards, if any: each below the main screen's
-        # buffer in RAM (room apart), its gdRect to the right of the
-        # desktop's, its own table for its depth; no driver of its own
-        # (gdRefNum 0), as a card whose driver the Mac hasn't got.  Its
-        # gdID is its slot's, as cards' are (Inside Macintosh V); the
-        # main screen's stays -1.
+        # buffer in RAM (room apart), no driver of its own (gdRefNum 0),
+        # as a card whose driver the Mac hasn't got.  Its gdID is its
+        # slot's, as cards' are (Inside Macintosh V); the main screen's
+        # stays -1.  Their gdRects spread round the main screen: the
+        # first to its left (the desktop reaches negative there, as
+        # secondary cards' are allowed to), the rest to its right.
+        # (F/A-18's Panorama mode reads each side screen's side by its
+        # gdRect's left, and gives both screens on the same side the
+        # same view.)
         for i in range(1, screens):
-            r = Rect(screen.top, screen.right * i, screen.bottom, screen.right * (i + 1))
+            left = -screen.right if i == 1 else screen.right * (i - 1)
+            r = Rect(screen.top, left, screen.bottom, left + screen.right)
             gd_h = self.new_device(r, base - room * i, row_bytes, depth)
             gdd = GDevice(mem, deref(mem, gd_h))
             gdd.flags = (

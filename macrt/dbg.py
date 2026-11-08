@@ -672,15 +672,18 @@ def where(view: dict) -> str:
     return f" at {place}  (not in a known routine)"
 
 
-def register_text(view: dict) -> str:
+def register_text(view: dict, pc_ram: str | None = None) -> str:
     """The registers as they're written: hex, the flags by name, the mode
     and interrupt level the status register holds.  Under the PC, the
     routine it sits in, when a symbol table knows one -- the line is left
-    blank when it doesn't, so SP stays where it is.  Over the data
-    registers, the application the low-memory globals say is current:
-    whose code these registers are running."""
+    blank when it doesn't, so SP stays where it is.  The PC's own line
+    carries its Ghidra address when one is known: `pc_ram`, as `ram:XXXXXXXX`
+    -- the byte the PC points at, counted the way the dump counts it, which
+    is how it's looked up there.  Over the data registers, the application
+    the low-memory globals say is current: whose code these registers are
+    running."""
     flags = view["flags"]
-    lines = [f" PC  {view['pc']:08X}",
+    lines = [f" PC  {view['pc']:08X}" + (f"  {pc_ram}" if pc_ram else ""),
              f"     {view['symbol']}" if view.get("symbol") else ""]
     lines += [f" SP  {view['sp']:08X}",
               f" SR  {view['sr']:04X}  {flag_line(flags)}  {mode(flags)}", "",

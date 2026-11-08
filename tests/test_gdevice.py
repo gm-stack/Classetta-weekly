@@ -690,7 +690,10 @@ def test_three_screens_hang_from_the_main_device(qapp):
         assert not gd.flags & (1 << mainScreen) and gd.ref_num == 0   # no driver of its own
     w = g.system.screen.bounds.width
     for i, gd in enumerate(gds):
-        assert gd.rect == Rect(0, w * i, g.system.screen.bounds.bottom, w * (i + 1))
+        # The first side screen's to the main's left, the rest to its right
+        # (F/A-18's Panorama reads the side by the gdRect's left).
+        left = {0: 0, 1: -w}.get(i, w * (i - 1))
+        assert gd.rect == Rect(0, left, g.system.screen.bounds.bottom, left + w)
         pm = PixMap(g.mem, deref(g.mem, gd.pmap))
         assert pm.bounds == gd.rect               # the PixMap's in globals too
 
@@ -707,7 +710,8 @@ def test_three_screens_are_in_the_scrn_resource(qapp):
         _, slot, base, _mode, _mask, flags, gd_id, _gamma, top, left, bottom, right, _ctl = row
         assert slot == 9 + i
         assert gd_id == -1 if i == 0 else gd_id == 0x29 + i
-        assert (left, right) == (w * i, w * (i + 1))
+        assert (left, right) == (({0: 0, 1: -w}.get(i, w * (i - 1))),
+                                 ({0: 0, 1: -w}.get(i, w * (i - 1))) + w)
         assert flags & (1 << gdevice.screenActive)   # every card's screen is active
         assert bool(flags & (1 << mainScreen)) == (i == 0)
         # Each screen's buffer is there: a buffer row's worth of heap.
@@ -719,7 +723,7 @@ def test_the_desk_is_the_whole_desktop_and_painted_on_every_screen(qapp):
     system = g.system
     gray = read_rgn(system.mem, system.mem.r32(lowmem.GrayRgn))
     w = system.screen.bounds.width
-    assert gray.bbox == Rect(0, 0, system.screen.bounds.bottom, w * 3)
+    assert gray.bbox == Rect(0, -w, system.screen.bounds.bottom, w * 2)
     # The buffers: room apart, below the main one, none of them the desk yet.
     extra = system.screen.extra
     assert len(extra) == 2
@@ -772,19 +776,19 @@ def test_device_enumeration_spans_the_screens(qapp):
     w, h = g.system.screen.bounds.width, g.system.screen.bounds.bottom
     gdh, second, third = g.system.devices.screens
     assert g("GetMaxDevice", g.rect_ptr((0, 0, 10, 10))) == gdh     # the main screen's
-    assert g("GetMaxDevice", g.rect_ptr((0, w + 100, 10, w + 110))) == second
-    assert g("GetMaxDevice", g.rect_ptr((0, 2 * w - 5, 10, 2 * w + 5))) == second
+    assert g("GetMaxDevice", g.rect_ptr((0, -100, 10, -90))) == second   # screen 2: the left
+    assert g("GetMaxDevice", g.rect_ptr((0, w + 100, 10, w + 110))) == third  # screen 3: the right
     assert g("GetMaxDevice", g.rect_ptr((h + 10, 0, h + 20, 10))) == 0
 
     seen = []
     g.procs[0x50000] = lambda *args: seen.append(args)
-    g("SetRectRgn", (rgn := g("NewRgn")), w + 100, 0, w + 110, 10)   # only screen 2
+    g("SetRectRgn", (rgn := g("NewRgn")), -100, 0, -90, 10)   # only screen 2
     g("DeviceLoop", rgn, 0x50000, 7, 0)
     assert seen == [(8, GDevice(g.mem, deref(g.mem, second)).flags, second, 7)]
     seen.clear()
-    g("SetRectRgn", rgn, 2 * w - 5, 0, 2 * w + 5, 10)   # across 2's edge: 2 and 3 both
+    g("SetRectRgn", rgn, -5, 0, 5, 10)   # across 2's edge: 2 and the main both
     g("DeviceLoop", rgn, 0x50000, 7, 0)
-    assert [c[2] for c in seen] == [second, third]
+    assert [c[2] for c in seen] == [gdh, second]
     seen.clear()
     g("DeviceLoop", g("NewRgn"), 0x50000, 7, 4)          # allDevices: every screen
     assert [c[2] for c in seen] == [gdh, second, third]

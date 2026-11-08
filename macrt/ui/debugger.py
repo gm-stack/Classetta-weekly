@@ -227,6 +227,15 @@ For any <addr>:
         self.refresh_breakpoints()
 
     # -- the log ----------------------------------------------------------------
+    def mcp_log(self, task: str, result) -> None:
+        """A request that came in over the MCP server, and what it answered.
+        It goes into the same log a typed command goes into, so the two can
+        be read side by side; the server's thread posts it here, on the GUI
+        one, which is the window's."""
+        self._log(f"mcp> {task}")
+        if result:
+            self._log(f"    {result}")
+
     def _log(self, text: str) -> None:
         """A line added to what's happened.  The log is kept to what a window
         is tall enough to scroll through; a game that breaks at a trap in its
@@ -299,7 +308,12 @@ For any <addr>:
             self.listing.setPlainText("")
 
     def _draw(self, view: dict) -> None:
-        text = register_text(view)
+        # The PC's Ghidra address, when a map is to hand: the byte it points
+        # at, counted the way the dump counts it.  None when there's no map
+        # yet, which is not an error -- the line simply stays the machine's
+        # own.
+        jank = self.commands.to_jank(view["pc"])
+        text = register_text(view, None if jank is None else f"ram:{jank:08X}")
         self._fit_registers(text)
         self.registers.setPlainText(text)
         self._draw_listing(view)
