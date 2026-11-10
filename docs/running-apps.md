@@ -79,6 +79,7 @@ With no application specified, Classetta will launch a pair of demo apps.
 
 `--menubar global`: (default) Draw a single menu bar at the top of the screen.
 `--menubar window` Attach a menu bar under each window's own title bar.
+`--menubar native` Use the host's own native menu bar for the front application's menus. macOS only — the menus appear in the system menu bar at the top of the screen, and the emulated screen has no menu bar strip of its own.
 
 `--classic-menus`: Disables implementation of Mac OS 8 style [Sticky Menus](https://dev.os9.ca/techpubs/mac/HIGOS8Guide/thig-55.html) - which allows menus to be clicked once and stay open. With this feature set, the mouse must remain pressed for the menu to remain open.
 
@@ -158,7 +159,7 @@ See [Text and fonts](architecture.md#text-and-fonts) for more information.
 
 Use `QT_QPA_PLATFORM=xcb` to work around this (drawing via XWayland) or `--host screen` (drawing everything in one window).
 
-**macOS** already has a global menu bar at the top of the screen. Use `--menubar window` or `--host screen` there.
+**macOS** already has a global menu bar at the top of the screen. Use `--menubar window`, `--host screen`, or `--menubar native` (which puts the front app's menus in the system menu bar) there.
 
 With `--host desktop`, the shaped windows and their 1-pixel shadows rely on `setMask` being correctly interpreted by the OS / window manager.
 

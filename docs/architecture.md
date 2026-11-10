@@ -353,6 +353,7 @@ macrt/
     window.py        the widgets that show a WindowRecord
     chrome.py        window frames: geometry, hit-testing, painting
     menubar.py       the menu bar and menus, and MenuSelect's tracking
+    nativemenu.py    the front app's menus in the host's native menu bar (macOS)
     tracking.py      TrackGoAway, TrackBox, DragWindow, GrowWindow
     bridge.py        running Toolbox calls on the GUI thread
     keymap.py        Qt keys to the Mac's key codes

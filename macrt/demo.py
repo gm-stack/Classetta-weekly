@@ -6,6 +6,7 @@ reacts to a click unless the guest asks it to.
 
     python -m macrt                          # host windows, global menu bar
     python -m macrt --menubar window         # menu bar under each title bar
+    python -m macrt --menubar native         # the host's native menu bar (macOS)
     python -m macrt --host screen            # everything inside one Mac screen
 
 Or run a real 68k application instead (see docs/running-apps.md):
@@ -271,8 +272,9 @@ def parse_args(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", choices=["desktop", "screen"], default="desktop",
                     help="Mac windows as host windows, or inside one emulated screen")
-    ap.add_argument("--menubar", choices=["global", "window"], default="global",
-                    help="one bar for the front app, or one under each window's title bar")
+    ap.add_argument("--menubar", choices=["global", "window", "native"], default="global",
+                    help="one bar for the front app, one under each window's title bar, or "
+                         "the host's native menu bar (macOS only)")
     ap.add_argument("--size", default=None, help="Mac screen size, e.g. 640x480")
     ap.add_argument("--speed", type=float, default=None, metavar="N",
                     help="run 68k code at about N times a Mac Plus's speed, for games that "
