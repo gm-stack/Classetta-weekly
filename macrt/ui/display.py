@@ -354,11 +354,16 @@ class Display(QObject):
             # The bar the Finder would have left in the screen buffer, for
             # a game that draws over it with no InitMenus (MacLanding).
             self.system.screen.bar_drawn(self.global_bar.image())
-        # The native menu bar (macOS only): one for the whole application,
-        # showing the front app's menus, as the host's own menu bar does.
-        self.native_menu: NativeMenuBar | None = None
+        # The native menu bar (macOS only).  On macOS the system menu bar
+        # belongs to the key window, so each top-level window carries a native
+        # bar for its application; the one the user is using is the one macOS
+        # shows.  host=screen: a single bar on the screen window, following
+        # the front app.  host=desktop: one per window, each its own app's.
+        self.native_bars: dict = {}
+        self._native_pending: dict = {}     # process -> the picked MenuSelect result
         if self.config.menu_bar == "native":
-            self.native_menu = NativeMenuBar(self)
+            if self.host_window is not None:
+                self.native_bars[self.host_window] = NativeMenuBar(self, self.host_window)
         # Only once it's built: what goes wrong building it isn't in a slot
         if sys.excepthook is sys.__excepthook__:
             sys.excepthook = _report_gui_error
@@ -372,8 +377,6 @@ class Display(QObject):
             self.screen_widget.setFocus()
         if self.global_bar is not None:
             self.global_bar.show()
-        if self.native_menu is not None:
-            self.native_menu.show()
 
     def launch(self, name: str, main: GuestMain | None, app: MacFile | None = None,
                folder: Folder | None = None, trace: bool = False,
@@ -465,8 +468,9 @@ class Display(QObject):
         app = QApplication.instance()
         app.removeEventFilter(self._router)
         self._app_bar_timer.stop()
-        if self.native_menu is not None:
-            self.native_menu.close()
+        for bar in self.native_bars.values():
+            bar.close()
+        self.native_bars.clear()
         widgets = [*self.views.values(), *self.app_bars.values(), self.global_bar,
                    self.host_window, *self._alerts, *self.file_dialogs,
                    *self.print_dialogs, *self.disk_dialogs, *self.color_dialogs,
@@ -722,6 +726,11 @@ class Display(QObject):
         self.views[rec] = view
         if self.screen_widget is None:
             view.setCursor(self._qcursor(self._cursor_of(rec.process)))
+            # host=desktop: each window carries its own app's native bar.
+            if self.config.menu_bar == "native":
+                bar = NativeMenuBar(self, view)
+                self.native_bars[view] = bar
+                bar.sync(rec.process)
         view.sync()
         self._app_bar_timer.start()
         return view
@@ -730,6 +739,9 @@ class Display(QObject):
         view = self.views.pop(rec, None)
         if view is None:
             return
+        bar = self.native_bars.pop(view, None)
+        if bar is not None:
+            bar.close()
         self._retire(view)
         self._app_bar_timer.start()
 
@@ -798,7 +810,7 @@ class Display(QObject):
             rec.process.events.wake()
 
     def find_window(self, proc: Process, pt: Point) -> tuple[int, WindowRecord | None]:
-        if self.native_menu is not None and pt.v < 0:
+        if self.native_bars and pt.v < 0:
             return inMenuBar, None       # the native menu bar's synthetic click
         if (self.global_bar is not None and pt.v < theme.MENU_BAR_HEIGHT
                 and 0 <= pt.h < self.size[0]):
@@ -871,8 +883,8 @@ class Display(QObject):
     def track_menu(self, proc: Process, pt: Point, ask=None) -> Future | int:
         # A native menu bar's choice: the guest got the synthetic mouseDown,
         # asked the bar, and the item is already picked — no mouse to follow.
-        if self.native_menu is not None and pt.v < 0:
-            result = self.native_menu.take_pending(proc)
+        if self.native_bars and pt.v < 0:
+            result = self._native_pending.pop(proc, None)
             if result is not None:
                 return result
         bar = self.bar_at(pt) or self.default_bar(proc)
@@ -886,6 +898,7 @@ class Display(QObject):
         """The user picked a native menu bar's item: hand the guest the
         mouseDown in the bar it expects, so its FindWindow -> MenuSelect
         runs and MenuSelect answers with the picked item."""
+        self._native_pending[proc] = result
         proc.events.post(EventRecord(mouseDown, 0, 0, Point(-1, 0), self.input.modifiers))
 
     def track_popup(self, proc: Process, menu: Menu, where: Point, item: int,
@@ -960,8 +973,14 @@ class Display(QObject):
         if self.global_bar is not None:
             self.global_bar.process = self.front_process
             self.global_bar.update()
-        if self.native_menu is not None:
-            self.native_menu.sync()
+        if self.native_bars:
+            # The screen window's bar follows the front app; a desktop
+            # window's bar shows its own app's menus.
+            if self.host_window in self.native_bars:
+                self.native_bars[self.host_window].sync(self.front_process)
+            for view, bar in self.native_bars.items():
+                if view is not self.host_window:
+                    bar.sync(view.rec.process)
         for view in self.views.values():
             if view.bar is not None:
                 view.bar.update()

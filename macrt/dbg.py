@@ -188,8 +188,9 @@ class Commands:
     def place(self, text: str) -> Place:
         """An address as typed, in the machine's own terms.  `ram:` in front
         makes it Ghidra's, and translates it; a live one gets the Ghidra
-        address added when a map already in hand knows it, so the answer
-        says both without going and building a map for the sake of it."""
+        address added too, so the answer carries both numbers however it
+        was asked -- unless the byte is outside the application, when there
+        is no Ghidra one to say."""
         text = (text or "").strip()
         if is_jank(text):
             jank = parse_address(text[len(JANK_PREFIX):])
@@ -212,14 +213,26 @@ class Commands:
         return live
 
     def to_jank(self, live: int) -> int | None:
-        """The Ghidra address behind a live one, when a map is already to
-        hand: said back so a live address can be looked up in Ghidra.  None
-        when there's no map, which is not an error worth reporting."""
-        app_map = self.app_map(build=False)
+        """The Ghidra address behind a live one: said back so a live address
+        can be looked up in Ghidra.  None when there's no application to
+        translate against, or the byte is outside the application -- system
+        code, a heap thunk -- which is not an error worth reporting.
+
+        The map is built when nothing has needed it yet, exactly as
+        `to_live` builds it: a live address coming from the debugger's PC or
+        from `regs` is the usual way this direction is asked, and it arrives
+        before the tracer, the namer or the hook engine has made a map.
+        Answering None then would say "this byte isn't the application's"
+        when the truth is that the map hadn't been made."""
+        app_map = self.app_map(build=True)
         if app_map is None:
             return None
         try:
-            return app_map.ghidra_at(live)
+            jank = app_map.ghidra_at(live)
+            if jank is None:
+                app_map.refresh()     # a segment loaded since the map was made
+                jank = app_map.ghidra_at(live)
+            return jank
         except Exception:                                     # noqa: BLE001
             return None               # a stand-in map needn't answer
 

@@ -17,7 +17,8 @@ NEW, CLOSE, QUIT = 1, 2, 4
 
 
 def bar_of(h):
-    return h.d.native_menu.bar
+    # host=screen: the one bar, on the screen window.
+    return h.d.native_bars[h.d.host_window].bar
 
 
 def menu_of(h, title):
@@ -39,7 +40,7 @@ def test_native_menu_shows_front_apps_menus(harness):
     h = harness(menu_bar="native")
     app = Recorder("App")
     h.launch(app)
-    assert h.d.native_menu is not None
+    assert h.d.host_window in h.d.native_bars
     titles = [a.text() for a in bar_of(h).actions()]
     assert "File" in titles and "Edit" in titles
     # No emulated menu bar strip on the screen.
@@ -75,20 +76,62 @@ def test_native_disabled_item_not_pickable(harness):
 
 def test_native_bar_follows_the_front_app(harness):
     h = harness(menu_bar="native")
-    p1 = h.launch(Recorder("First"))
-    assert h.d.native_menu._last[0] == id(p1)
-    p2 = h.launch(Recorder("Second"))
-    # The second app is now in front; the bar was rebuilt for it.
-    assert h.d.front_process is p2
-    assert h.d.native_menu._last[0] == id(p2)
+    first = Recorder("First")
+    h.launch(first)
+    # Give the first app a menu the second won't have, so the bar's shape
+    # tells us which app it's showing.
+    extra = first.tb.NewMenu(140, "Extra")
+    first.tb.AppendMenu(extra, "Something")
+    first.tb.InsertMenu(extra, 0)
+    first.tb.DrawMenuBar()
+    assert "Extra" in [a.text() for a in bar_of(h).actions()]
+    # A second app comes to the front; the bar must now show its menus,
+    # which have no "Extra".
+    h.launch(Recorder("Second"))
+    assert "Extra" not in [a.text() for a in bar_of(h).actions()]
+
+
+def test_native_state_change_updates_in_place(harness):
+    # The bug: a change to an item's state (enabled, checked, text) must
+    # not clear and rebuild the bar — a native menu bar loses its items
+    # when it's rebuilt while in use.
+    h = harness(menu_bar="native")
+    app = Recorder("App")
+    h.launch(app)
+    edit = menu_of(h, "Edit")
+    edit_qm = edit                      # hold the QMenu; a rebuild drops it
+    # Rename an Edit item: a state change, not a shape change.
+    app.tb.SetItem(app.tb.GetMHandle(Recorder.EDIT), 1, "Undo Typing")
+    # The same QMenu is still in the bar (no rebuild), and the item's text
+    # is the new one.
+    assert edit_qm in [a.menu() for a in bar_of(h).actions()]
+    assert edit.actions()[0].text() == "Undo Typing"
+
+
+def test_native_items_have_no_macos_role(harness):
+    # The bug: by default Qt gives items a heuristic role, and macOS moves
+    # an "About"/"Preferences"/"Quit" item out of its menu into the app's
+    # own menu — so the guest's Apple menu items disappear from it.
+    h = harness(menu_bar="native")
+    app = Recorder("App")
+    h.launch(app)
+    from PyQt6.QtGui import QAction
+    for top in bar_of(h).actions():
+        for act in top.menu().actions():
+            if not act.isSeparator():
+                assert act.menuRole() == QAction.MenuRole.NoRole
 
 
 def test_native_desktop_mode(harness):
-    # host="desktop" too: the native bar is the application's, not a
-    # window's, so it works the same way there.
+    # host="desktop": there's no screen window, so each window carries its
+    # own app's native bar.
     h = harness(menu_bar="native", host="desktop")
     app = Recorder("App")
     proc = h.launch(app)
     before = len(proc.windows)
-    menu_of(h, "File").actions()[NEW - 1].trigger()
+    view = h.d.views[proc.windows[0]]
+    bar = h.d.native_bars[view].bar
+    file = next(a.menu() for a in bar.actions() if a.text() == "File")
+    file.actions()[NEW - 1].trigger()
     h.wait_until(lambda: len(proc.windows) == before + 1, what="File > New's window")
+    assert hi_word(app.last("MenuSelect")[1]) == FILE

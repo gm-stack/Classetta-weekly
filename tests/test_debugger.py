@@ -684,6 +684,129 @@ def test_the_window_refuses_to_be_closed_by_the_user(window):
     assert debug.attached                        # still watching, still holding
 
 
+# ---------------------------------------------------------------------------
+# The screen's pause notice
+# ---------------------------------------------------------------------------
+class ScreenDisplay:
+    """A display with an emulated screen to put the notice on, and the
+    machine's Debug under it.  (The notice is a widget on the screen, so it
+    needs a real screen widget -- which is also why the stub display above
+    sees none of it: with no screen there's nowhere for it to go.)"""
+
+    def __init__(self, debug, screen):
+        self.system = SimpleNamespace(machine=SimpleNamespace(debug=debug))
+        self.screen_widget = screen
+
+
+@pytest.fixture
+def screen_window(qapp):
+    """The window on a machine that has a screen: a guest running the loop,
+    and a MacScreen sized like one."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QWidget
+
+    from macrt.ui.debugger import DebuggerWindow
+
+    mem, cpu = machine()
+    guest = Guest(cpu)
+    screen = QWidget()
+    screen.setFixedSize(640, 480)
+    screen.setProperty("macrt_role", "screen")
+    display = ScreenDisplay(guest.debug, screen)
+    win = DebuggerWindow(display)
+    try:
+        yield win, guest, guest.debug, screen
+    finally:
+        guest.close()
+        win.force_close()
+        qapp.processEvents()
+
+
+def test_pausing_puts_the_notice_on_the_screen(screen_window):
+    """The core held -- the game stopped on the machine -- and the screen
+    says so, big and red, in Qt rather than in the framebuffer: the game
+    can't paint over it, because the game doesn't own it."""
+    from PyQt6.QtCore import Qt
+
+    win, guest, debug, screen = screen_window
+    win.refresh()
+    assert win._overlay is None, "a running machine has nothing to notice"
+
+    debug.request_pause()
+    guest.wait_stopped()
+    win.refresh()
+    overlay = win._overlay
+    assert overlay is not None and not overlay.isHidden()
+    assert overlay.text() == "PAUSED IN DEBUGGER"
+    assert overlay.parentWidget() is screen
+    assert overlay.geometry() == screen.rect()
+    assert overlay.font().pointSize() > 13            # large
+    assert "FF0000" in overlay.styleSheet().upper()   # red
+    # Not in the game's way: input reaches the screen it covers.
+    assert overlay.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+
+def test_resuming_takes_the_notice_off(screen_window):
+    """The notice follows the processor: it's the state, read from the one
+    place, that shows and hides it -- so it can't sit on a running game."""
+    win, guest, debug, screen = screen_window
+    win.refresh()
+    debug.request_pause()
+    guest.wait_stopped()
+    win.refresh()
+    assert not win._overlay.isHidden()
+
+    debug.request_go()
+    deadline = time.monotonic() + 2.0
+    while debug.is_stopped() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    win.refresh()
+    assert win._overlay.isHidden()
+
+
+def test_the_notice_is_off_when_the_window_lets_the_core_go(screen_window):
+    """Closing the window releases the processor, and the poll that would
+    have hidden the notice stops with it -- so the notice comes off at the
+    release itself, rather than hanging over a game nobody holds."""
+    win, guest, debug, screen = screen_window
+    win.refresh()
+    debug.request_pause()
+    guest.wait_stopped()
+    win.refresh()
+    assert not win._overlay.isHidden()
+    win.force_close()
+    assert win._overlay.isHidden()
+
+
+def test_the_notice_says_what_the_registers_say(screen_window):
+    """One pause, two views of it: the screen's notice and the window's
+    registers can't disagree, because the poll shows and hides them
+    together."""
+    win, guest, debug, screen = screen_window
+    win.refresh()
+    debug.request_pause()
+    guest.wait_stopped()
+    win.refresh()
+    assert win.status.text() == "paused"
+    assert not win._overlay.isHidden()
+
+
+def test_the_notice_fits_the_screen_it_is_on(screen_window):
+    """The size is found by measuring, so the notice reads the same on any
+    Mac screen -- here, shrunk to stay inside a small one."""
+    win, guest, debug, screen = screen_window
+    screen.setFixedSize(160, 120)
+    debug.request_pause()
+    guest.wait_stopped()
+    win.refresh()
+    overlay = win._overlay
+    assert not overlay.isHidden()
+    from PyQt6.QtGui import QFontMetrics
+
+    assert QFontMetrics(overlay.font()).horizontalAdvance(overlay.text()) \
+        <= screen.width()
+
+
 def test_the_register_panel_names_every_register_and_the_flags():
     from macrt.m68k.cpu import ccr_names
     from macrt.ui.debugger import register_text

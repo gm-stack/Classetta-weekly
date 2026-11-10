@@ -41,7 +41,7 @@ goes and fetch one itself.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPalette, QTextCursor
 from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
                              QPlainTextEdit, QPushButton, QTextEdit,
@@ -56,6 +56,12 @@ POINT_SIZE = 13
 RAW_WIDTH = 20            # how wide the bytes column is, in characters
 LOG_LINES = 500           # what the running log keeps: a game breaking in its
                           # own loop would otherwise fill it up
+
+PAUSE_TEXT = "PAUSED IN DEBUGGER"
+PAUSE_FONT_MAX = 64       # the pause notice's size when the screen is big
+                          # enough for it; PausedOverlay shrinks it to fit
+PAUSE_FONT_MIN = 8        # and never below this
+RED = "#FF0000"
 
 
 class DebuggerWindow(QMainWindow):
@@ -76,6 +82,7 @@ class DebuggerWindow(QMainWindow):
         self._shown = None              # what's on screen: not redrawn each poll
         self._logged_view = None        # the stop whose reason the log has: logged once
         self._closing = False           # the display's shutdown: let it close
+        self._overlay = None            # the screen's pause notice, made on first pause
         central = QWidget(self)
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
@@ -208,6 +215,11 @@ For any <addr>:
             debug = self._debug()
             if debug is not None:
                 debug.detach()          # let a held core go, and stop slicing
+            # The poll is what takes the pause notice off the screen, and
+            # it stops here; the core is about to run free, so the notice
+            # goes now rather than hanging over a game nobody is holding.
+            if self._overlay is not None:
+                self._overlay.set_paused(False)
             self._timer.stop()
             super().closeEvent(event)
         else:
@@ -305,6 +317,16 @@ For any <addr>:
         self._shown = (state, view)
         self.status.setText(state)
         self.play.setText("Resume" if state == PAUSED else "Pause")
+        if state == PAUSED or self._overlay is not None:
+            # The screen is told whatever the state is, so resuming takes the
+            # notice off; the overlay itself is only made once there's a
+            # pause to show -- and only over a screen the notice can go on.
+            if self._overlay is None and state == PAUSED:
+                screen = getattr(self.display, "screen_widget", None)
+                if screen is not None:
+                    self._overlay = PausedOverlay(screen)
+            if self._overlay is not None:
+                self._overlay.set_paused(state == PAUSED)
         if view is None:
             self._clear()
         else:
@@ -323,10 +345,10 @@ For any <addr>:
             self.listing.setPlainText("")
 
     def _draw(self, view: dict) -> None:
-        # The PC's Ghidra address, when a map is to hand: the byte it points
-        # at, counted the way the dump counts it.  None when there's no map
-        # yet, which is not an error -- the line simply stays the machine's
-        # own.
+        # The PC's Ghidra address: the byte it points at, counted the way
+        # the dump counts it.  None when the byte is outside the
+        # application, which is not an error -- the line simply stays the
+        # machine's own.
         jank = self.commands.to_jank(view["pc"])
         text = register_text(view, None if jank is None else f"ram:{jank:08X}")
         self._fit_registers(text)
@@ -433,3 +455,70 @@ def open_debugger(display) -> DebuggerWindow:
     window.show()
     window.raise_()
     return window
+
+
+class PausedOverlay(QLabel):
+    """The screen's notice that the processor is being held: big red text,
+    centred, over whatever the Mac has on screen.
+
+    It's a Qt widget on the emulated screen rather than pixels in the screen
+    buffer, because the buffer belongs to QuickDraw and to the game: anything
+    drawn there is scratch — a game repainting its window, or a Flip, takes the
+    notice off.  And the game is the wrong party to be told about the hold in
+    the first place; the person holding it is the one to see it.
+
+    It says nothing about the machine's state of its own accord: the debugger
+    window's poll shows and hides it from `debug.is_stopped()`, so the notice
+    and the registers can't disagree about whether anything is stopped.
+
+    It passes its own mouse events through (WA_TransparentForMouseEvents) and
+    takes no keyboard focus: the game's input routing goes through the screen
+    widget's own mouse tracking, and the overlay isn't in the way of it — you
+    can still click a dialog while the core is held, and the game will act on
+    it when it's let go."""
+
+    def __init__(self, screen: QWidget):
+        super().__init__(PAUSE_TEXT, screen)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAutoFillBackground(False)
+        self.setStyleSheet(f"color: {RED}; background: transparent;")
+        self._resize_to(screen)
+        self.hide()
+
+    def set_paused(self, paused: bool) -> None:
+        """The notice on, or off.  It's asked for by the state of the
+        processor, so the two are read from the one place."""
+        if paused:
+            # The screen may have changed size since the notice was made --
+            # it lives as long as the debugger window does -- so it's
+            # measured again on the way on.
+            if self.parentWidget() is not None:
+                self._resize_to(self.parentWidget())
+            self.raise_()
+            self.show()
+        else:
+            self.hide()
+
+    def _resize_to(self, screen: QWidget) -> None:
+        """The text as large as the screen will take it, and no bigger: the
+        size is found by measuring rather than fixed, so the notice reads the
+        same on a 640x480 Mac screen as on a 1024x768 one.  (It shrinks the
+        point size until the text fits; PAUSE_FONT_MIN is where it gives up,
+        and small text on a small screen is better than none.)"""
+        if self.geometry() != screen.rect():
+            self.setGeometry(screen.rect())
+        for size in range(PAUSE_FONT_MAX, PAUSE_FONT_MIN - 1, -1):
+            font = QFont(self.font())
+            font.setPointSize(size)
+            font.setBold(True)
+            if QFontMetrics(font).horizontalAdvance(PAUSE_TEXT) <= screen.width():
+                self.setFont(font)
+                return
+        # A screen too small for the text even at its smallest: say it
+        # anyway, in letters that fit.
+        font = QFont(self.font())
+        font.setPointSize(PAUSE_FONT_MIN)
+        font.setBold(True)
+        self.setFont(font)

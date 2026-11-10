@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from macrt import symtab
 from macrt.dbg import (DUMP_LINES_MAX, Commands, Place, ascii_of, dump_line,
                        is_jank, parse_address, parse_value)
 from macrt.memory import RAM
@@ -286,6 +287,24 @@ def test_a_live_address_names_its_ghidra_one(game):
     place = commands.place(f"${live:08X}")
     assert place.jank == entry
     assert place.shown() == f"${live:08X} (ram:{entry:08X})"
+
+
+def test_a_live_address_names_its_ghidra_one_with_no_map_yet(game):
+    """The other way about, asked first: a live address off the registers or
+    `regs` arrives before anything has needed Ghidra's addresses, and the
+    answer still names them.  Answering None here would say "outside the
+    application" about a byte that's the application's own code."""
+    h, proc, lay, commands = game
+    assert getattr(proc.runner, "tracer", None) is None
+    assert getattr(proc.runner, "namer", None) is None
+    assert getattr(proc.runner, "_trace_app_map", None) is None
+
+    entry = the_sym(lay, "AddTwo")["entry"]
+    # The machine's own number for it, from a map the debugger has never
+    # heard of: the same byte, said where the debugger looks.
+    live = symtab.AppMap(proc, lay).resolve(entry)
+    assert commands.to_jank(live) == entry
+    assert commands.place(f"${live:08X}").shown() == f"${live:08X} (ram:{entry:08X})"
 
 
 def test_ram_without_an_application_says_what_it_needs(rig):
