@@ -368,7 +368,11 @@ def parse_args(argv=None):
                     help="open a window watching the 68k processor: pause it and "
                          "single-step it, with its registers and the code around "
                          "the program counter; --symbols also names the routine "
-                         "the PC sits in (names only, no trace hooks)")
+                         "the PC sits in (names only, no trace hooks).  The "
+                         "debugger's Hardware button opens a window of the "
+                         "machine's screens: their modes and where their pixels "
+                         "are in memory, with their colour tables while they're "
+                         "in an indexed colour mode")
     ap.add_argument("--mcp", nargs="?", const="", default=None, metavar="PORT",
                     help="answer MCP over HTTP on localhost, so a client like "
                          "Claude Code gets the debugger's commands and a script's "
@@ -642,6 +646,10 @@ def main(argv=None) -> int:
         # soon as there's anything to watch.
         from .ui.debugger import open_debugger
         open_debugger(display)
+        # The machine's hardware -- its screens, their modes, where their
+        # pixels are, their colour tables while they're indexed -- opens from
+        # a button in the debugger window: it only looks, and a closed
+        # window polls nothing, so it's made only when asked for.
     if args.script or args.mcp is not None:
         # Made once for whichever of the two needs it, and with the symbol
         # options either way.  It reads its symbol table lazily -- on the first

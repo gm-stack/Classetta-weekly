@@ -90,6 +90,13 @@ class DebuggerWindow(QMainWindow):
         self.step.setEnabled(False)
         controls.addWidget(self.play)
         controls.addWidget(self.step)
+        # The machine's screens, their modes, where their pixels are and
+        # their colour tables: a second window, opened only when asked.  It
+        # polls the machine while it's open and nothing at all while it's
+        # closed, so its cost is zero until this button is pressed.
+        self.hardware_button = QPushButton("Hardware")
+        self.hardware_button.clicked.connect(self._hardware)
+        controls.addWidget(self.hardware_button)
         self.status = QLabel(NOTHING)
         self.status.setStyleSheet("color: #777")
         controls.addStretch(1)
@@ -182,6 +189,14 @@ For any <addr>:
         debug = self._debug()
         if debug is not None:
             debug.request_step()
+
+    def _hardware(self) -> None:
+        """The hardware window, opened: the machine's screens and their
+        colour tables.  It's made on first ask -- the button is the only
+        door into it -- and raised if the user already has it open; closed
+        with its own X, it stays closed until the button is pressed again."""
+        from .hardware import open_hardware
+        open_hardware(self.display)
 
     def closeEvent(self, event):  # noqa: N802
         """The window doesn't go away at the user's wish: it's the machine's
