@@ -364,6 +364,12 @@ def parse_args(argv=None):
                          "single-step it, with its registers and the code around "
                          "the program counter; --symbols also names the routine "
                          "the PC sits in (names only, no trace hooks)")
+    ap.add_argument("--mcp", nargs="?", const="", default=None, metavar="PORT",
+                    help="answer MCP over HTTP on localhost, so a client like "
+                         "Claude Code gets the debugger's commands and a script's "
+                         "powers: status, pause, step, continue, breakpoints, "
+                         "memory, screenshots and keys.  PORT defaults to 8765.  "
+                         "Point the client at http://127.0.0.1:<port>/mcp")
     args = ap.parse_args(argv)
     if args.memory is not None and args.memory <= 0:
         ap.error("--memory is a size in K, more than 0")
@@ -425,6 +431,19 @@ def open_targets(args):
             view = True
         targets.append((f, view))
     return targets, disks, None
+
+
+def _mcp_port(text: str) -> int | None:
+    """The port --mcp named, or the default.  None for anything that isn't a
+    port, so main can say so the way it says everything else."""
+    from .mcpserver import DEFAULT_PORT
+    if not text:
+        return DEFAULT_PORT
+    try:
+        port = int(text, 10)
+    except ValueError:
+        return None
+    return port if 0 < port < 65536 else None
 
 
 def _run_script(display, path: str, quit_when_done: bool = False) -> None:
@@ -611,17 +630,34 @@ def main(argv=None) -> int:
         # soon as there's anything to watch.
         from .ui.debugger import open_debugger
         open_debugger(display)
-    if args.script:
-        # The controller the script gets reads its symbol table lazily --
-        # on the first hook/call/name, from --symbols or the Ghidra
-        # project -- so a script that only drives the game never pays for
-        # the read.
+    if args.script or args.mcp is not None:
+        # Made once for whichever of the two needs it, and with the symbol
+        # options either way.  It reads its symbol table lazily -- on the first
+        # hook/call/name, from --symbols or the Ghidra project -- so a session
+        # that only drives the game with keys and clicks never pays for the
+        # read, but one that asks for a routine by name finds it.
         from .ui.automation import Controller
         controller = getattr(display, "_controller", None) or Controller(
             display, symbols_file=args.symbols, ghidra_project=args.ghidra_project,
             ghidra_program=args.ghidra_program, ghidra_home=args.ghidra_home)
         display._controller = controller
-        _run_script(display, args.script, quit_when_done=args.quit_when_done)
+        if args.script:
+            _run_script(display, args.script, quit_when_done=args.quit_when_done)
+    if args.mcp is not None:
+        # The debugger and the script's powers, over MCP on localhost, on a
+        # thread of its own: it only ever asks the GUI thread to do things, so
+        # it can't disturb the machine it's watching.  Same controller as a
+        # script would have had, so hooks and symbol names are the ones both
+        # are looking at.
+        port = _mcp_port(args.mcp)
+        if port is None:
+            log.error("--mcp wants a port number between 1 and 65535")
+            return 2
+        from .mcpserver import serve
+        url = serve(display, getattr(display, "_controller", None),
+                    port=port).url
+        if not url:
+            return 2            # the port was taken; serve() said which
     signal.signal(signal.SIGINT, lambda *_: display.shutdown())
     heartbeat = QTimer(interval=200)      # lets Python see Ctrl+C
     heartbeat.timeout.connect(lambda: None)

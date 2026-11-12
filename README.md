@@ -67,6 +67,8 @@ python -m macrt "System 6.0.8.dsk" --app TeachText
 python -m macrt One.bin Two.hqx                 # several, side by side
 python -m macrt App.bin --view                  # its menus and windows, without its code
 python -m macrt App.bin --trace-traps           # log every trap it calls
+python -m macrt App.bin --debug                 # the debugger window (MacsBug's grammar)
+python -m macrt App.bin --mcp                   # the debugger over MCP, on localhost
 ```
 
 [Running a Mac application](docs/running-apps.md) has the whole story.
@@ -106,6 +108,8 @@ read for what. In short:
 - **[How macrt works](docs/architecture.md):** the processor, the trap
   dispatcher, memory, drawing, resources and files, and the source tree,
   for readers who know the 68k and the Mac's insides.
+- **[The debugger, and MCP](docs/debugger.md):** the debugger window,
+  the MCP server, and the `ram:` addresses that tie it to Ghidra.
 - **[Working on macrt](docs/development.md):** the tests, the 68k test
   applications, and adding a Toolbox routine.
 - **[Surveying many applications](docs/survey.md):** running hundreds of

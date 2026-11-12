@@ -11,6 +11,7 @@ These pages say how to use it, what it implements, and how it's built.
 | [Titles tried so far](titles.md) | The applications run so far, how far each gets, and what to give it on the command line |
 | [What works](toolbox.md) | The Toolbox and Operating System a manager at a time: what macrt does, and where and why it differs from a Mac |
 | [How macrt works](architecture.md) | The processor, the trap dispatcher, memory, drawing, resources and files, and the source tree |
+| [The debugger, and MCP](debugger.md) | The debugger window, the MCP server, and the `ram:` addresses that tie it to Ghidra |
 | [Working on macrt](development.md) | The tests and what each covers, the 68k test applications, and adding a Toolbox routine |
 | [Surveying many applications](survey.md) | Running hundreds of titles headless, and comparing two surveys to see what a change did |
 

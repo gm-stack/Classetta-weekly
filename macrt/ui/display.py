@@ -379,6 +379,11 @@ class Display(QObject):
         # debugger's way of being closed at all: it refuses the user's X.
         if getattr(self, "debugger", None) is not None:
             self.debugger.force_close()
+        # No more commands from across the socket, before the things they
+        # act on go away: a tool call arriving now would answer with an error
+        # rather than half-running against a dead machine.
+        if getattr(self, "mcp_server", None) is not None:
+            self.mcp_server.stop()
         for proc in self.processes:
             proc.kill()
         app = QApplication.instance()

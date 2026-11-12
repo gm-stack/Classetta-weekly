@@ -393,6 +393,13 @@ macrt/
   moof.py      Applesauce MOOF floppy images: each track's GCR bits decoded
                back to sectors
   process.py   one running guest application
+  dbg.py       the debugger's commands and the rules about what's safe to read
+               while the machine runs — Qt-free, so the window and the MCP
+               server share one set of commands
+  mcpserver.py the MCP server on localhost: the tools, on a thread that only
+               ever asks the guest thread and the GUI thread
+  inject.py    hooks on the application's own routines, for tracing and for
+               calling into it
   viewer.py    the resource listing, and ResourceViewer, which shows an
                app's menus and windows from its resources
   demo.py      the command line, and the demo's Sampler and Ticker

@@ -598,7 +598,7 @@ def _shape_args(t, word: int, sig: Signature, sp: int) -> list[str]:
         if reg.startswith("Out<"):
             continue
         try:
-            v = _read_reg(t.cpu, reg, code, word)
+            v = _reader(reg, code)(t.cpu, word)
         except BusError:
             v = Ellipsis
         args.append(f"{reg}={_fmt_val(v, code)}")
@@ -642,11 +642,14 @@ def result_text(t, sig: Signature | None) -> str:
             return "1" if not t.cpu.d(0) else "0"
         if sig.os_style or sig.result_reg:
             reg = sig.result_reg or "D0"
-            return _fmt_val(_read_reg(t.cpu, reg, sig.result, 0), sig.result)
+            return _fmt_val(_reader(reg, sig.result)(t.cpu, 0), sig.result)
         at = t.cpu.sp
         code = sig.result
-        if code in "hH":
-            v = t.mem.r16s(at) if code == "h" else t.mem.r16(at)
+        if code in "hHe":
+            # An OSErr is a signed short, as it is out of a register: taking
+            # it for a long reads the slot's neighbour too, and answers -1
+            # with four billion.
+            v = t.mem.r16s(at) if code in "he" else t.mem.r16(at)
         elif code in "bB":
             v = t.mem.r8s(at) if code == "b" else t.mem.r8(at)
         elif code == "P":

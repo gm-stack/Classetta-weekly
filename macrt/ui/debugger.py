@@ -5,7 +5,13 @@ It opens with --debug, alongside the Mac screen.  Pause and resume across
 the top; the registers down the left; the breakpoints down the right; and
 in the middle, a log of what's happened over the code around the program
 counter, with the arrow at the line the PC is on.  Under that, a command
-line: b, bt, bmr and bmw to break, the same with a c in front to clear.
+line: b, bt, bmr and bmw to break, the same with a c in front to clear, dm
+and sm to read and write memory -- and ram: in front of any address to give
+it the way Ghidra counts, which the debugger translates for you.
+
+What those commands *do* is in macrt.dbg, shared with the MCP server, so a
+command typed here and the same command over a socket can't mean two
+things.  This file is the window: the asking, the drawing, and the log.
 
 The window never touches the processor.  The guest thread owns it and is
 inside the core's native code whenever instructions are running; reading
@@ -41,27 +47,15 @@ from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow
                              QPlainTextEdit, QPushButton, QTextEdit,
                              QVBoxLayout, QWidget)
 
+from ..dbg import (PAUSED, RUNNING, NOTHING, Commands, flag_line, mode,
+                   parse_address, register_text, register_text_sample, trap_keys,
+                   where)
+
 POLL = 100                # ms between looks: the window's heartbeat
-PAUSED, RUNNING, NOTHING = "paused", "running", "nothing to watch yet"
 POINT_SIZE = 13
 RAW_WIDTH = 20            # how wide the bytes column is, in characters
 LOG_LINES = 500           # what the running log keeps: a game breaking in its
                           # own loop would otherwise fill it up
-
-
-def _reverse_trap_names() -> dict[str, set[int]]:
-    """Trap names to the keys they are: a break on a name catches every word
-    that is one.  Built once, from the trap table the disassembler uses."""
-    global _TRAP_NAMES
-    if _TRAP_NAMES is None:
-        from ..m68k import dispatch
-        _TRAP_NAMES = {}
-        for key, name in dispatch.NAMES.items():
-            _TRAP_NAMES.setdefault(name, set()).add(key)
-    return _TRAP_NAMES
-
-
-_TRAP_NAMES = None
 
 
 class DebuggerWindow(QMainWindow):
@@ -72,6 +66,11 @@ class DebuggerWindow(QMainWindow):
     def __init__(self, display):
         super().__init__()
         self.display = display
+        # What a command does: macrt.dbg.  The one set for this display, so
+        # the MCP server and this window share it -- one dm page, one set of
+        # breakpoints -- rather than two that agree until someone pages
+        # through memory from both.
+        self.commands = Commands.for_display(display)
         self.setWindowTitle("Classetta debugger")
         self.resize(1200, 620)
         self._shown = None              # what's on screen: not redrawn each poll
@@ -143,7 +142,8 @@ class DebuggerWindow(QMainWindow):
         self._timer = QTimer(self, interval=POLL)
         self._timer.timeout.connect(self.refresh)
         self._timer.start()
-        self._log("debugger open: b <addr>, bt <trap>, bmr/bmw <addr>; c in front clears one")
+        self._log("debugger open: b <addr>, bt <trap>, bmr/bmw <addr>; c in front clears one; "
+                  "dm/sm read and write memory; ram:<hex> is Ghidra's address; ? lists them")
 
     # -- the machine, which there may not be one of yet -----------------------
     def _debug(self):
@@ -194,68 +194,25 @@ class DebuggerWindow(QMainWindow):
 
     # -- the command line -------------------------------------------------------
     # One command a line, entered as typed: b and cb and their kindred, in
-    # the MacsBug letters.  An address is hex, with or without the $; a trap
-    # is its name, with or without the _, or the word itself.
+    # the MacsBug letters, dm and sm for memory, and ram: in front of an
+    # address to name it Ghidra's way.  What they do lives in macrt.dbg,
+    # shared with the MCP server so the two can't come to disagree about what
+    # a command means; what's here is the typing, and the log the answer goes
+    # into.
     def _command(self) -> None:
         text = self.command.text().strip()
         self.command.clear()
         if not text:
             return
         self._log(f"> {text}")
-        debug = self._debug()
-        if debug is None:
-            self._log("no processor yet: nothing to break on")
-            return
-        parts = text.split()
-        cmd, arg = parts[0].lower(), parts[1] if len(parts) > 1 else ""
-        if cmd.startswith("c") and len(cmd) > 1:
-            kind, clearing = cmd[1:], True
-        else:
-            kind, clearing = cmd, False
         try:
-            if kind == "b":
-                self._bp_address(debug, parse_address(arg), clearing)
-            elif kind == "bt":
-                self._bp_trap(debug, arg, clearing)
-            elif kind in ("bmr", "bmw"):
-                self._bp_memory(debug, kind[2], parse_address(arg), clearing)
-            else:
-                self._log(f"don't know the command {cmd}")
-        except ValueError as e:
-            self._log(str(e))
+            for line in self.commands.run(text):
+                self._log(line)
+        except Exception as e:                                   # noqa: BLE001
+            # A command is no reason to lose the window, and with it the
+            # hold on the core: what went wrong is the answer, not a crash.
+            self._log(f"{type(e).__name__}: {e}")
         self.refresh_breakpoints()
-
-    def _bp_address(self, debug, addr: int, clearing: bool) -> None:
-        if clearing:
-            debug.clear_bp_addr(addr)
-            self._log(f"cleared breakpoint at ${addr:06X}")
-        else:
-            debug.add_bp_addr(addr)
-            self._log(f"breakpoint at ${addr:06X}")
-
-    def _bp_memory(self, debug, letter: str, addr: int, clearing: bool) -> None:
-        add, clear = (debug.add_bp_memr, debug.clear_bp_memr) if letter == "r" \
-            else (debug.add_bp_memw, debug.clear_bp_memw)
-        what = f"{'read' if letter == 'r' else 'write'} of ${addr:06X}"
-        if clearing:
-            clear(addr)
-            self._log(f"cleared breakpoint on {what}")
-        else:
-            add(addr)
-            self._log(f"breakpoint on {what}")
-
-    def _bp_trap(self, debug, name: str, clearing: bool) -> None:
-        keys = sorted(trap_keys(name))
-        if not keys:
-            self._log(f"no trap called {name}")
-            return
-        for key in keys:
-            if clearing:
-                debug.clear_bp_trap(key)
-            else:
-                debug.add_bp_trap(key)
-        shown = f"_{dispatch_name(keys[0])}" if len(keys) == 1 else name
-        self._log(f"{'cleared breakpoint on' if clearing else 'breakpoint on'} trap {shown}")
 
     # -- the log ----------------------------------------------------------------
     def _log(self, text: str) -> None:
@@ -363,60 +320,8 @@ class DebuggerWindow(QMainWindow):
         self.listing.setExtraSelections([] if at is None else [current_line(self.listing, at)])
 
 
-def where(view: dict) -> str:
-    """Where a stop is, said the way the user asked for it: the address, and
-    the routine the PC sits in with its offset from the entry -- when a
-    symbol table knows one.  (The snapshot carries the symbol already in
-    that shape; see Debug.snapshot.)  A PC with nothing around it to name
-    says whether that's because no table is loaded, or the address is simply
-    outside any routine one was made for."""
-    place = f"${view['pc'] & 0xFFFFFF:06X}"
-    if view.get("symbol"):
-        return f" at {place}, {view['symbol']}"
-    if not view.get("symbols"):
-        return f" at {place}  (no symbol table loaded)"
-    return f" at {place}  (not in a known routine)"
-
-
-def register_text(view: dict) -> str:
-    """The registers as they're written: hex, the flags by name, the mode
-    and interrupt level the status register holds.  Under the PC, the
-    routine it sits in, when a symbol table knows one -- the line is left
-    blank when it doesn't, so SP stays where it is.  Over the data
-    registers, the application the low-memory globals say is current:
-    whose code these registers are running."""
-    flags = view["flags"]
-    lines = [f" PC  {view['pc']:08X}",
-             f"     {view['symbol']}" if view.get("symbol") else ""]
-    lines += [f" SP  {view['sp']:08X}",
-              f" SR  {view['sr']:04X}  {flag_line(flags)}  {mode(flags)}", "",
-              "CurApName:", view.get("app_name") or "(no application)", ""]
-    for n, v in enumerate(view["d"]):
-        lines.append(f" D{n}  {v:08X}")
-    lines.append("")
-    for n, v in enumerate(view["a"]):
-        lines.append(f" A{n}  {v:08X}")
-    return "\n".join(lines)
-
-
-def mode(flags: dict) -> str:
-    """The part of the status register that isn't a condition code."""
-    level = flags["irq"]
-    return ("sup" if flags["supervisor"] else "usr") + \
-           (f" irq{level}" if level else "") + (" trace" if flags["trace"] else "")
-
-
-def register_text_sample() -> str:
-    """The longest line register_text can ever write, so the panel can be
-    made exactly wide enough for it: a flag is a letter whether it's set or
-    not, and the mode line has every part of it."""
-    return " SR  FFFF  XNZVC  sup irq7 trace"
-
-
-def flag_line(flags: dict) -> str:
-    """The condition codes as MacsBug writes them: the ones that are set,
-    among the ones that aren't."""
-    return "".join(c if flags[c] else c.lower() for c in "XNZVC")
+# where(), register_text() and the rest of the text a stop is written in come
+# from macrt.dbg, where the MCP server writes the same stop the same way.
 
 
 def current_line(listing, row: int) -> QTextEdit.ExtraSelection:
@@ -469,49 +374,6 @@ def hrule() -> QFrame:
     line.setFrameShape(QFrame.Shape.HLine)
     line.setFrameShadow(QFrame.Shadow.Sunken)
     return line
-
-
-def parse_address(text: str) -> int:
-    """An address as typed: hex, with or without the $ or a 0x.  A number
-    in a debugger is hex -- a MacsBug address is -- and the letters in one
-    (a $2C00's C) rule out reading it any other way."""
-    bare = text.strip().lstrip("$")
-    if bare.lower().startswith("0x"):
-        bare = bare[2:]
-    if not bare:
-        raise ValueError("no address given")
-    try:
-        return int(bare, 16)
-    except ValueError:
-        raise ValueError(f"{text} is not an address") from None
-
-
-def trap_keys(name: str) -> set[int]:
-    """The trap keys a command's argument names: a routine's name with or
-    without its underscore, or a trap word itself -- a $ or 0x always makes
-    a word, and a bare hex number is one when it's in the A-line range
-    where every trap word is.  Nothing for a name the trap table doesn't
-    know, so the caller can say so."""
-    text = name.strip()
-    bare = text.lstrip("$")
-    explicit = text.startswith("$") or bare.lower().startswith("0x")
-    try:
-        word = int(bare[2:] if bare.lower().startswith("0x") else bare, 16)
-    except ValueError:
-        word = None
-    if word is not None and (explicit or 0xA000 <= word <= 0xAFFF):
-        return {dispatch_trap_key(word)}
-    return set(_reverse_trap_names().get(text.lstrip("_"), ()))
-
-
-def dispatch_trap_key(word: int) -> int:
-    from ..m68k import dispatch
-    return dispatch.trap_key(word)
-
-
-def dispatch_name(key: int) -> str:
-    from ..m68k import dispatch
-    return dispatch.trap_name(key)
 
 
 def mono(point_size: int = POINT_SIZE) -> QFont:
