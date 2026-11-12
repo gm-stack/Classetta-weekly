@@ -301,19 +301,26 @@ def dispose_pix_pat(mem: RAM, heap: Heap, h: int) -> None:
 
 
 class Devices:
-    """The System's graphics devices: the main screen's, in the System heap,
-    its handle in DeviceList, MainDevice and, to start with, each
-    application's TheGDevice."""
+    """The System's graphics devices: the screen's, in the System heap,
+    the main screen's handle in DeviceList, MainDevice and, to start
+    with, each application's TheGDevice, and its gdNextGD naming the
+    next screen's device, and so on to NIL.  The main screen's device is
+    first (CopyBits special-cases the head of the list), carries the
+    video card's driver number, and its gdRect is the whole desktop's
+    top-left corner: the others' gdRects sit alongside it in the same
+    global coordinates, and their PixMaps hold their screens' pixels."""
 
     def __init__(self, mem: RAM, heap: Heap, screen: Rect, base: int, row_bytes: int,
-                 depth: int):
+                 depth: int, room: int = 0, screens: int = 1):
         self.mem = mem
         self.heap = heap
         self.depth = depth
         self._seed = MIN_SEED
-        self._table: tuple[int, list[int]] = (-1, [])      # the main device's, by its seed
-        self._raw: list[int] = []                           # as its colour table has them
-        self._index: dict[int, int] | None = None           # colour -> index, in _table
+        # The main device's colour state: by its table's seed, its colours
+        # as the table has them, and what the caches of them hold.
+        self._table: tuple[int, list[int]] = (-1, [])
+        self._raw: list[int] = []
+        self._index: dict[int, int] | None = None
         self._nearest: dict[int, int] = {}
         self._matching: list[int] | None = None
         # The main device's indexes the Palette Manager has reserved for
@@ -328,6 +335,27 @@ class Devices:
             1 << ramInit | 1 << mainScreen | 1 << allInit | 1 << screenDevice | 1 << screenActive)
         gd.mode = DEFAULT_MODE + DEPTH_MODES[depth]
         gd.ref_num = VIDEO_DRIVER
+        gd.id = -1              # the main screen's gdID, as cards report it
+        self.screens = [self.main]
+        prev = self.main
+        # The other screens' cards, if any: each below the main screen's
+        # buffer in RAM (room apart), its gdRect to the right of the
+        # desktop's, its own table for its depth; no driver of its own
+        # (gdRefNum 0), as a card whose driver the Mac hasn't got.  Its
+        # gdID is its slot's, as cards' are (Inside Macintosh V); the
+        # main screen's stays -1.
+        for i in range(1, screens):
+            r = Rect(screen.top, screen.right * i, screen.bottom, screen.right * (i + 1))
+            gd_h = self.new_device(r, base - room * i, row_bytes, depth)
+            gdd = GDevice(mem, deref(mem, gd_h))
+            gdd.flags = (
+                1 << gdDevType if 1 < depth <= 8 else 0) | (
+                1 << ramInit | 1 << allInit | 1 << screenDevice | 1 << screenActive)
+            gdd.mode = DEFAULT_MODE + DEPTH_MODES[depth]
+            gdd.id = VIDEO_SLOT + i + 0x20
+            GDevice(mem, deref(mem, prev)).next_gd = gd_h
+            self.screens.append(gd_h)
+            prev = gd_h
         mem.w32(lowmem.DeviceList, self.main)
         mem.w32(lowmem.MainDevice, self.main)
         mem.w32(lowmem.TheGDevice, self.main)
@@ -401,6 +429,31 @@ class Devices:
         colour = 1 < depth <= 8 and not gray
         gd.flags = gd.flags & ~(1 << gdDevType) | colour << gdDevType
         gd.mode = DEFAULT_MODE + DEPTH_MODES[depth]
+        # The other screens are the machine's too: same buffer size,
+        # same depth, same colours -- their cards change with the
+        # main one's (a program's SetDepth reaches the driver on the
+        # main screen only).
+        for gdh in self.screens[1:]:
+            gdd = GDevice(mem, deref(mem, gdh))
+            ct2 = PixMap(mem, deref(mem, gdd.pmap)).pm_table
+            if heap.handle_size(ct2) != len(data) and not heap.set_handle_size(ct2, len(data)):
+                return False
+            mem.write(heap.deref(ct2), data)
+            if depth <= 8:
+                ih2 = gdd.i_table
+                if not ih2:
+                    ih2 = heap.new_handle(len(itab))
+                elif heap.handle_size(ih2) != len(itab):
+                    if not heap.set_handle_size(ih2, len(itab)):
+                        return False
+                mem.write(heap.deref(ih2), itab)
+                gdd = GDevice(mem, deref(mem, gdh))
+                gdd.i_table = ih2
+            pm2 = PixMap(mem, deref(mem, gdd.pmap))
+            write_pixmap(mem, pm2.addr, pm2.base_addr, row_bytes, pm2.bounds, depth, ct2)
+            gdd.type = clutType if depth <= 8 else directType
+            gdd.flags = gdd.flags & ~(1 << gdDevType) | colour << gdDevType
+            gdd.mode = DEFAULT_MODE + DEPTH_MODES[depth]
         self.depth = depth
         self.reserved = {}
         self.held = set()
@@ -408,22 +461,26 @@ class Devices:
         return True
 
     def scrn(self) -> bytes:
-        """A 'scrn' resource for the screen as it is (Inside Macintosh V,
-        Graphics Device Resources), as the Control Panel writes one to the
-        System file when the user sets the screen's depth, and some
+        """A 'scrn' resource for the screens as they are (Inside Macintosh
+        V, Graphics Device Resources), as the Control Panel writes one to
+        the System file when the user sets the screen's depth, and some
         programs read to see how many colours it shows: JuliaSet 5.1
-        looks for the main screen's mode in it.  The one card, in
-        VIDEO_SLOT, whose memory starts with the screen buffer; its mode,
-        flags and rectangle, as its GDevice has them; the standard colour
-        table for the depth, the 'clut' of that ID; no gamma table, and
-        no control calls.  Its spDrvrHw is the DrHW the card's declaration
-        ROM gives (glue_slots)."""
-        gd = GDevice(self.mem, deref(self.mem, self.main))
-        r = gd.rect
-        return struct.pack(">HhhLhHHhh4hH", 1, VIDEO_DR_HW, VIDEO_SLOT,
-                           self.pixmap(self.main).base_addr,
-                           gd.mode, SCRN_FLAG_MASK, gd.flags & SCRN_FLAGS, self.depth, -1,
-                           r.top, r.left, r.bottom, r.right, 0)
+        looks for the main screen's mode in it.  One card per screen: the
+        main one in VIDEO_SLOT, its memory starting with the screen
+        buffer, the others in the NuBus slots above it; each record's
+        mode, flags, gdID and rectangle, as its GDevice has them; the
+        standard colour table for the depth, the 'clut' of that ID; no
+        gamma table, and no control calls.  spDrvrHw is the DrHW the
+        card's declaration ROM gives (glue_slots)."""
+        out = struct.pack(">H", len(self.screens))
+        for i, gdh in enumerate(self.screens):
+            gd = GDevice(self.mem, deref(self.mem, gdh))
+            r = gd.rect
+            out += struct.pack(">hhLhHHhh4hH", VIDEO_DR_HW, VIDEO_SLOT + i,
+                               self.pixmap(gdh).base_addr,
+                               gd.mode, SCRN_FLAG_MASK, gd.flags & SCRN_FLAGS, gd.id, -1,
+                               r.top, r.left, r.bottom, r.right, 0)
+        return out
 
     def pixmap(self, gdh: int) -> PixMap | None:
         p = deref(self.mem, GDevice(self.mem, deref(self.mem, gdh)).pmap) if gdh else 0

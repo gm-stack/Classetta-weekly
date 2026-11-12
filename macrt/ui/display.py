@@ -33,7 +33,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QEvent, QObject, QPoint, Qt, QTimer
 from PyQt6.QtGui import QCursor, QGuiApplication, QImage, QPainter, QPixmap
-from PyQt6.QtWidgets import QApplication, QMessageBox, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QHBoxLayout, QMessageBox, QVBoxLayout, QWidget
 
 from ..m68k.segload import Layout
 from ..m68k.sound import WaveFile
@@ -77,6 +77,7 @@ class DisplayConfig:
     host: str = "desktop"
     menu_bar: str = "global"
     screen_size: tuple[int, int] | None = None   # None: host screen / 640x480
+    screens: int = 1                             # host screen windows for it, side by side
     sticky_menus: bool = True
     application_menu: str = "auto"               # "auto" | "always" | "never"
     system_file: MacFile | None = None           # a real System file's resources, if wanted
@@ -95,6 +96,8 @@ class DisplayConfig:
             raise ValueError(f"host must be one of {HOSTS}")
         if self.menu_bar not in MENU_BARS:
             raise ValueError(f"menu_bar must be one of {MENU_BARS}")
+        if self.screens < 1:
+            raise ValueError(f"{self.screens} screens isn't a machine")
 
 
 class InputState:
@@ -152,14 +155,53 @@ class ScreenWindow(QWidget):
         super().__init__()
         self.display = display
         self.setWindowTitle(f"macrt — {size[0]}×{size[1]}")
-        layout = QVBoxLayout(self)
+        # Side by side: with extra screens, host coordinates stay Mac
+        # globals, so mouse mapping needs no per-screen case at all.
+        layout = QHBoxLayout(self) if display.config.screens > 1 else QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         self.screen_widget = MacScreen(size, self)
         layout.addWidget(self.screen_widget)
 
     def closeEvent(self, event):  # noqa: N802
         self.display.shutdown()
         event.accept()
+
+
+class ExtraScreen(QWidget):
+    """host="screen", a screen after the first: its own buffer's desk,
+    where the desk is (its gdRect's), with no menu bar and no corners:
+    those are the Mac screen proper's."""
+
+    def __init__(self, mirror: Screen, index: int, size: tuple[int, int], parent: QWidget):
+        super().__init__(parent)
+        self.setFixedSize(*size)
+        self.setProperty("macrt_role", "screen")
+        self.setMouseTracking(True)
+        self.mirror = mirror
+        self.index = index        # 0 for the buffer after the main screen's
+
+    def paintEvent(self, event):  # noqa: N802
+        p = QPainter(self)
+        mirror = self.mirror
+        p.fillRect(self.rect(), mirror.desk_brush)
+        if mirror.extra_drawn[self.index]:
+            buffer = mirror.extra[self.index]
+            r = event.rect()
+            # Whatever the buffer holds is this screen: no windows and no
+            # menu bar live here, so the buffer's own pixels show — the
+            # desk brush only behind an unwritten buffer.  (The desk
+            # region is the main screen's; on the extras it can be empty,
+            # a game's full-screen window covering the desktop.)
+            b = buffer.bounds
+            box = Rect(max(r.top(), 0), max(r.left(), 0),
+                       min(r.bottom() + 1, b.height), min(r.right() + 1, b.width))
+            if box.top < box.bottom and box.left < box.right:
+                # buffer.image takes buffer bounds, not buffer-local: the
+                # widget's box mapped to globals.
+                g = Rect(box.top + b.top, box.left + b.left,
+                         box.bottom + b.top, box.right + b.left)
+                p.drawImage(QPoint(box.left, box.top), buffer.image(g))
 
 
 _MOUSE = {QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick,
@@ -258,7 +300,7 @@ class Display(QObject):
                              disk_system=disk_system, disk_fonts=fonts_beside(disk_system),
                              speed=self.config.speed, model=self.config.model,
                              sound=self.sound, depth=self.config.depth,
-                             row_bytes=self.config.row_bytes)
+                             row_bytes=self.config.row_bytes, screens=self.config.screens)
         for disk in disks:
             self.system.files.mount_folder(VolumeFolder(disk))
         # The window and the application-wide filter come once nothing
@@ -267,6 +309,18 @@ class Display(QObject):
         if self.config.host == "screen":
             self.host_window = ScreenWindow(self, self.size)
             self.screen_widget = self.host_window.screen_widget
+            # The other screens, their gdRects side by side with the main
+            # screen's in the host too, so a host point is a Mac global.
+            self.extra_screens: list[ExtraScreen] = []
+            for i in range(len(self.system.screen.extra)):
+                buffer = self.system.screen.extra[i]
+                extra = ExtraScreen(self.system.screen, i,
+                                    (buffer.bounds.width, buffer.bounds.height),
+                                    self.host_window)
+                self.host_window.layout().addWidget(extra)
+                self.extra_screens.append(extra)
+                self.system.screen.on_extra_desk.append(
+                    lambda box, i=i: self.bridge.post(self._extra_desk_drawn, i, box))
         self._router = InputRouter(self)
         QApplication.instance().installEventFilter(self._router)
         self.system.screen.order = lambda: self.processes
@@ -699,6 +753,12 @@ class Display(QObject):
             self.screen_widget.update(qrect(box))
             if self.global_bar is not None and box.top < self.desk_top:
                 self.global_bar.update(qrect(box))
+
+    def _extra_desk_drawn(self, i: int, box: Rect) -> None:
+        """A program drew in extra screen i's buffer, in box (that screen's
+        own buffer coordinates, and so its host widget's)."""
+        if i < len(self.extra_screens):
+            self.extra_screens[i].update(qrect(box))
 
     def view_moved(self, view: MacWindowView) -> None:
         """The host moved a window (e.g. a Wayland system move)."""

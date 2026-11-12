@@ -142,8 +142,20 @@ class DebuggerWindow(QMainWindow):
         self._timer = QTimer(self, interval=POLL)
         self._timer.timeout.connect(self.refresh)
         self._timer.start()
-        self._log("debugger open: b <addr>, bt <trap>, bmr/bmw <addr>; c in front clears one; "
-                  "dm/sm read and write memory; ram:<hex> is Ghidra's address; ? lists them")
+        self._log("""Classetta Debugger:
+b <addr>: break at addr
+bt <trap>: break at trap (specify name)
+bmr/bmw <addr>: break on memory read / memory write at addr
+prepend c to command to clear breakpoint i.e. cb <addr>
+
+dm <addr>: display memory at address
+sm <addr> <value>: set memory at address
+
+For any <addr>:
+    bare hex for machine address
+    ram:<hex> for an address that will match Ghidra program dump
+"""
+                  "")
 
     # -- the machine, which there may not be one of yet -----------------------
     def _debug(self):

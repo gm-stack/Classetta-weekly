@@ -1,12 +1,10 @@
 # Running a Mac application
 
-Part of [the documentation](README.md).
+[Go back to the documentation index](README.md).
 
-macrt runs classic Mac applications, the programs written for 68000-family
-Macs and System 1 to 7, as windows on your desktop next to your own
-programs. It reads the application's resources and loads its 68k code
-into an emulated processor. Python answers the Toolbox and Operating
-System calls that code makes, and PyQt6 draws the result.
+Classetta runs classic Mac applications written for 68k Macs, targeting approximately System 1 to 7. Apps can run as windows on your desktop next to your OS's native programs.
+
+It reads the application's resources and loads the 68k code into an emulated processor. Python answers the Toolbox and Operating System calls that code makes, and the graphical user interface is then drawn using PyQt6.
 
 This page covers what to install, how to get an application to macrt in a
 form it can read, how to run it, and what to do when it stops.
@@ -23,146 +21,213 @@ form it can read, how to run it, and what to do when it stops.
 - [Writing a test application](development.md#the-test-applications)
 
 
-## Quick start
+## Quick start and command-line apps
+
+<!--
+TODO for this section:
+  - What's the point of Hello.bin? We also seem to have `sampler` and `ticker`? Should we not just launch with no app specified so that we get those two instead?
+  - Or perhaps the launch with no app should launch all three? If we've got it we may as well use it.
+
+  There seems to be some redundant syntax in launching apps - the first example shows just running with `python -m macrt tests/apps/Hello.bin` whereas apparently below we need `--app` - check the source code to see what's really going on here.
+
+  Some options feel a bit unnecessary - having more code to implement these means more code to test (and as this is a highly AI driven project, we are absolutely dependent on testing). Having more options presented to the user just makes the getting started seem overwhelming.
+    - `--classic-menus` I don't think needs to be a thing?
+    - I feel the same way about `--menubar window` - I feel like this just makes things way more complicated. But others may disagree.
+    - `--rainbow` shouldn't exist IMO - we should just enable this automatically when colour is enabled, to indicate that it is.
+    - `--single` feels really unnecessary. If this is used for testing, just pass a single `--app` instead.
+
+-->
 
 ```sh
-python -m pip install -e .              # PyQt6, unicorn, rsrcfork, machfs
+python -m pip install -e .
 python -m macrt tests/apps/Hello.bin
 ```
 
-Hello is one of the small test applications in `tests/apps`, written in 68k
-assembly. It opens a window and puts up a menu bar; File ▸ Quit ends it, as
-does ⌘Q (Ctrl+Q on a PC keyboard). If Hello runs, everything macrt needs is
-installed.
+Hello is a small test app in `tests/apps`, written in 68k assembly.
+It is very basic - it has a window and a menu bar.
 
-Then run your own application:
+Then to run your own application:
 
 ```sh
 python -m macrt MacPaint.bin
 python -m macrt "System 6.0.8.dsk" --app TeachText
 ```
 
-`pip install` also puts a `macrt` command on your path, so `macrt
-MacPaint.bin` does the same thing. With no file, macrt runs its two
-built-in demo programs instead.
+`pip install` will also puts a `macrt` command on your path, so `macrt
+MacPaint.bin` does the same thing.
 
+With no application specified, Classetta will launch a pair of demo apps.
+
+### Application Options
+
+`--app NAME`: Specify an application's file, or a path fragment (colon separated) that will be matched to the end of the path. The first candidate to match will be launched. Alternatively, specify a document to open it in its corresponding app (see [Opening a document](#opening-a-document)). Can be specified more than once to open multiple apps. If left unspecified, the "sampler" and "ticker" test apps will be launched.
+
+`--list file`: Dump a list of a file's resources and exit. Does not run any code from the app.
+
+`--view`: Launch an interactive explorer to show an application's menus, windows and dialogs (from its resources). Does not run any code from the app.
+
+`--system FILE`: Uses a real System file at the specified path (or specify a disk image containing one). This is optional - Classetta has its own versions of many common resources, but in the event of compatibility problems, this can be tried.
+
+`--memory K`: allocates K kilobytes of memory for the application. If unspecified, the "Preferred Size" will be used from the application's SIZE resource.
+
+`--single`: With no `--app` specified, runs only `sampler` (and not `ticker`).
+
+### User Interface Settings
+
+`--host desktop`: (default) Each Mac window is a native window in your host OS. This works like Mac OS X's former "Classic" mode.
+`--host screen`: Classetta will have single window representing the full Mac screen. This provides an interface like most emulators (qemu, Basilisk II etc...)
+
+`--menubar global`: (default) Draw a single menu bar at the top of the screen.
+`--menubar window` Attach a menu bar under each window's own title bar.
+
+`--classic-menus`: Disables implementation of Mac OS 8 style [Sticky Menus](https://dev.os9.ca/techpubs/mac/HIGOS8Guide/thig-55.html) - which allows menus to be clicked once and stay open. With this feature set, the mouse must remain pressed for the menu to remain open.
+
+`--rainbow`: Shows a rainbow Apple logo in the menu bar.
+
+### Emulated CPU
+
+`--model plus`: (default) Emulate a Mac Plus - 68000 CPU and no FPU. Compatibility with earlier apps. If the screen is set to 512x342, it will be placed at the same memory address as the real machine.
+`--model ii`: Emulate a Mac II - 68020 CPU, 68881 FPU. Some games will draw direct to screen memory if they detect a 68000 CPU, but will use better methods on later Macs. Supports colour!
+`--model iix`: Emulate a Mac IIx - 68030 CPU, 68882 FPU. Also supports colour.
+
+`--speed N`: Limit CPU speed to about N times the speed of a real Mac Plus (for compatibility with early games that don't use proper timing). Default is to run as fast as possible.
+
+### Sound Options
+
+`--no-sound`: Don't output sound produced by the applications. The sound hardware will still be fully emulated - `--record-sound` will still work with this option set. See [Sound](#sound).
+`--record-sound FILE.wav` Writes the Mac's sound output to a WAV file.
+
+### Display Options
+
+`--size WxH`: The Mac screen's size in pixels, such as `512x342` or `1024x768`. Defaults to 640×480.
+
+`--depth 1`: Black and White (default for Mac Plus)
+`--depth 2`: 4 colours indexed / 4 greys
+`--depth 4`: 16 colours indexed / 16 greys
+`--depth 8`: 256 colours indexed / 256 greys
+`--depth 16`: 'Thousands of Colours' mode (5 bits per channel)
+`--depth 32`: 'Millions of Colours' mode (8 bits per channel)
+
+`--row-bytes N`: Set a custom value for the low memory global `RowBytes`. Default will set it to the minimum number of bytes for horizontal resolution * depth.
+
+> [!NOTE]
+> Nearly all apps do not use the value set by `--row-bytes`. Real Mac OS typically does not change this value if display resolution/depth is changed after boot, so this value is unreliable on real hardware. Most apps that intend to draw directly to the framebuffer either assume based on hardware, or query QuickDraw to get a correct value. Adjusting this number might be needed for certain apps to draw correctly - although these apps will have issues on many real setups.
+
+### Debug / Development
+
+`--trace-traps`: Log every Toolbox/OS trap call to the terminal as it's made, with arguments and return value. Be warned: this will have significant performance impacts.
+
+`--debug`: Runs with a debugger window that has a vaguely MacsBug inspired grammar. See [The debugger and MCP](debugger.md).
+`--mcp`: Enable a MCP server for the debugger, allowing your AI agents to use it to assist in debugging. See [The debugger and MCP](debugger.md).
+`--log FILE`: Writes all logged messages to a specified file (with any colour codes stripped).
 
 ## What you need
 
-- **Python 3.11 or later.**
-- **PyQt6** (6.5 or later) for the windows and menus.
-- **unicorn** (2.1 or later), the 68k processor emulator.
-- **rsrcfork** and **machfs**, which read resource forks and HFS disks'
-  B*-trees. (The rest of an HFS disk, and HFS Plus and MFS disks, macrt
-  reads itself.)
+- **Python**: 3.11 or later.
+- **PyQt6**: 6.5 or later - used to draw the UI.
+- **unicorn**: 2.1 or later - used to emulate the 68k CPU
+- **rsrcfork** and **machfs**: used to read resource forks and HFS filesystems.
 
-`pip install -e .` installs all four. unicorn has wheels for Linux, macOS
-and Windows.
+(Classetta uses its own internal implementation for HFS+ and MFS disks.)
 
-- **To unpack Mac archives** (StuffIt, Compact Pro and so on), get The
-  Unarchiver's command-line tool, `unar`: `apt install unar` or `brew
-  install unar`.
-- **To run without a display** (a server or CI), set
-  `QT_QPA_PLATFORM=offscreen`.
+`pip install -e .` installs all dependencies. Unicorn has pre-built wheels for Linux, macOS and Windows, so compilation from source should not be necessary.
+
+**To unpack Mac archives** (StuffIt, Compact Pro etc), get [The Unarchiver](https://theunarchiver.com)'s command-line tool, `unar`: `apt install unar` (Linux) or `brew install unar` (Mac OS with Homebrew).
+
+**To run headless** (e.g. on a server or for CI tasks), set the environment variable `QT_QPA_PLATFORM=offscreen`.
 
 ### Fonts
 
-The chrome looks right with Chicago (system font) and Geneva (application
-font). These aren't bundled. Put `.ttf`/`.otf` files in `macrt/ui/fonts/` and
-they load at startup. *ChicagoFLF* is a freely licensed Chicago clone. With a
-Mac font present, text is drawn without antialiasing for the crisp 1-bit look.
-Without one, macrt falls back to Helvetica at 13px with antialiasing on, because
-outline fonts look broken without it. `theme.TEXT_ANTIALIAS = True/False`
-forces either. An application's own fonts are drawn from their bitmaps
-(see [Text and fonts](architecture.md#text-and-fonts)).
+The interface will draw with Chicago (system font) and Geneva (application font). These aren't bundled. If your system doesn't have them, you will need to put `.ttf`/`.otf` files in `macrt/ui/fonts/`.
 
-### Wayland and macOS
+Use and Modify has developed [ChicagoFLF](https://usemodify.com/fonts/chicago/), a freely licensed Chicago clone.
 
-- **Wayland** doesn't let apps place their own windows. With `--host
-  desktop` window drags go through the compositor (`startSystemMove`), but
-  windows can't be placed exactly. Use `QT_QPA_PLATFORM=xcb` (XWayland) or
-  `--host screen`.
-- **macOS** already has a global menu bar at the top of the screen, so use
-  `--menubar window` or `--host screen` there.
-- With `--host desktop`, the shaped windows and their 1-pixel shadows rely
-  on `setMask`, which works without a compositor.
+With an appropriate font present, text is drawn without antialiasing for the crisp 1-bit look.
 
+Without one, Classetta falls back to using Helvetica at 13px with antialiasing on as it does not look good without it.
 
-## Which applications run
+Set the environment variable `theme.TEXT_ANTIALIAS = True/False` to force anti-aliased text on or off.
 
-| What you have | What macrt does |
-| --- | --- |
-| A 68k application: type `APPL` with `CODE` resources, as for a Mac Plus, SE, II, Classic, LC or a 68k PowerBook | runs it |
-| A fat application, with both 68k and PowerPC code | runs the 68k code |
-| A PowerPC-only application: a `cfrg` resource and no `CODE` | shows its menus, windows and dialogs from its resources, without running it |
-| A self-expanding application, compressed by AutoDoubler | runs it: the application's own decompressor expands its code and resources as they load |
-| An application built with MPW's far code model, its `CODE` segments starting with `$FFFF` | runs it when the runtime linked into it loads those segments itself, as Flash 2's does with `ReadPartialResource`; one whose jump table starts with far entries is refused at launch |
-| A desk accessory, in the System file or the application's own file | opens it from the application's Apple menu, or wherever the application lists it; it can't be run by itself |
-| A control panel: a `cdev` file with code of its own | runs it in a window of its own, as System 7's Finder did (see [Control panels](#control-panels)); a control panel that's an application, as System 7.5's Desktop Patterns is, runs as one |
-| Extensions (`INIT` files) | runs a control panel's own `INIT` resources as the panel opens, as a Mac runs them as it starts up (see [Control panels](#control-panels)); an extension that's a file of its own isn't run |
+An application can provide its own fonts in its resources, and these will be used.
 
-How far an application gets depends on the Toolbox calls it makes (see
-[What works](toolbox.md)). Programs that keep to the Toolbox do best:
-word processors, utilities, and games that draw through QuickDraw.
-Programs that need Color QuickDraw are less likely to work. Games from
-the Mac's first years, which draw straight into the screen and keep time
-by its hardware, run with `--host screen --size 512x342`; see [Games from
-1984](#games-from-1984).
+See [Text and fonts](architecture.md#text-and-fonts) for more information.
+
+### Menu Bars
+
+**Wayland** doesn't let apps place their own windows. With `--host desktop`, windows can be repositioned but windows can't be placed by the application.
+
+Use `QT_QPA_PLATFORM=xcb` to work around this (drawing via XWayland) or `--host screen` (drawing everything in one window).
+
+**macOS** already has a global menu bar at the top of the screen. Use `--menubar window` or `--host screen` there.
+
+With `--host desktop`, the shaped windows and their 1-pixel shadows rely on `setMask` being correctly interpreted by the OS / window manager.
+
+## What kind of applications are supported:
+
+- 68k Mac application (`APPL` with `CODE` resources): fully supported
+- Fat binary (68k and PPC): 68k version of the code will be used
+- PPC only application (`cfrg` resources, no `CODE` resources): the viewer will be launched instead as Classetta does not (yet) support PPC emulation.
+- A self-expanding application (AutoDoubler): will be decompressed by Classetta, and run as above.
+- An application built using MPW's 'far code' model (`CODE` segments begin with `$FFFF`): supported, provided the entry point is not a far pointer.
+- A desk accessory: can be launched from another application's Apple menu when another app is running, can't be run alone.
+
+Control Panels are supported but do not appear as separate applications. Any `INIT` resources (that would normally be loaded at system boot) will be loaded on launch.
+
+> [!NOTE]
+> Many control panels are actually normal applications (type code `APPL`). True control panels have type `cdev`.
+
+Extensions are not yet supported.
+
+How well an application works entirely depends upon which Toolbox calls it relies upon (see [What works](toolbox.md) for more detail).
+
+Programs that use widely used Toolbox calls and don't perform non-standard behaviour are most likely to work: word processors, utilities, and games that draw through plain QuickDraw.
+
+Color QuickDraw is a bit more of a work in progress, as it is much more complex.
+
+Games from the Mac's early years which attempt to draw directly to the screen buffer: run with `--host screen --size 512x342` and the display buffer will be placed into the emulated Mac's memory exactly where it would be on a real Mac to (hopefully) be compatible with this behaviour. See [Games from 1984](#games-from-1984) for more details.
+
+> [!NOTE]
+> TODO: confirm what happens with `APPC` type control panels.
 
 ### Tried so far
 
-[Applications tried so far](titles.md) lists the titles tried, where
-they came from, how far each gets, and what to give it on the command
-line. When you try another, the list of missing calls it prints when it
-quits (see [When it stops](#when-it-stops)) is what to report.
+[Applications tried so far](titles.md) lists the software that has been tested so far.
 
+If any unimplemented toolbox calls are made (that did not result in an immediate crash), at exit a list of unimplemented calls will be printed (see [When it stops](#when-it-stops) for more info / what to include with a feature request).
 
-## Getting the application to macrt
+## Getting applications into Classetta
 
-A Mac file has two forks. The **data fork** is what every other computer
-sees. The **resource fork** holds almost everything that makes an
-application: its code (`CODE` resources), menus, windows, dialogs, icons
-and strings.
+Unlike a lot of operating systems, classic Mac files can have two 'forks' or data streams. The **data fork** is the same concept as a file on nearly every other operating system. However, the **resource fork** holds individual entries of various types, in something more similar to a database. Segments of application code, menus, windows, dialogs, icons, sounds and strings are often stored as resources.
 
-If you copy a Mac application to a PC or a Unix machine the ordinary way,
-or download it from somewhere that wasn't careful, the resource fork is
-lost. What's left is a file of zero bytes, or a little data, that nothing
-can run.
+The file itself also has a four byte `type` code identifying what kind of file it is (application, document etc) and a four byte `creator` code linking the application and its documents - all without the use of file extensions. If this information is lost for an application, the classic Mac OS will not know it is an executable.
 
-So the application has to arrive in a form that carries both forks. macrt
-reads all the common ones, and you don't have to say which one you have;
-it works it out from the contents:
+What this means is that if you copy a Mac application to any other operating system (including modern MacOS in some circumstances), or download it from somewhere that wasn't careful to archive it correctly, the resource fork can be lost. The application will then be unusable.
 
-| Form | Looks like | Where it comes from |
-| --- | --- | --- |
-| MacBinary I, II or III | `App.bin` | downloads; most Mac transfer programs could write it |
-| BinHex 4.0 | `App.hqx` | downloads, Info-Mac and Usenet archives |
-| AppleSingle | one file holding both forks | A/UX, some archives |
-| AppleDouble | `App` next to `._App`, `.AppleDouble/App` or `App.rsrc` | `unar`, netatalk, macOS copying to a FAT disk |
-| Basilisk II and SheepShaver shared folders | `App` next to `.rsrc/App` and `.finf/App` | the emulators' host folder |
-| Executor | `App` next to `%App` | Executor's host folder |
-| a resource fork on its own | `App.rsrc`, or any file that is one | `DeRez`/`Rez` tooling, resource editors |
-| a macOS file | `App` itself, through `App/..namedfork/rsrc` | a Mac running macOS |
-| an HFS, HFS Plus or MFS disk image | `Disk.dsk`, `.img`, `.image`, `.hfs`, `.iso`, `.cdr`, `.toast` | raw and DiskCopy 4.2 floppy images (800K and 1.4MB HFS, 400K MFS), with each sector's 12 tag bytes or without them, HFS and HFS Plus CD images, partitioned hard disk images. A CD's image, or any other of 16 MB or more, is mapped rather than read in, and a file's forks are read from it only when they're wanted, so only what's used of it is in memory. A raw CD image, which keeps each of the disc's 2352-byte sectors whole, is read in as the 2048 bytes of data in each. |
-| a MOOF floppy image | `Disk.moof` | Applesauce, imaging a 400K or 800K floppy's tracks bit by bit |
+So the application needs to be provided in a form that correctly retains both forks. Classetta supports a number of the the common ones - just provide the file and it'll work out how to read it.
 
-For AppleDouble and the emulator folders, give macrt the data-fork file
-(`App`), and keep the side file where it is.
+- MacBinary I, II or III - `App.bin` - a very popular format back in the day.
+- BinHex 4.0 - `App.hqx` - also extremely common back in the day. Encodes as "plain text" so won't be corrupted by older online systems that were not "8 bit clean".
+- AppleSingle  - one file holding both forks - used on Apple's A/UX and in some file archives, never widely adopted.
+- AppleDouble - `App` (data) and `._App`/`.AppleDouble/App`/`App.rsrc`/`.rsrc/App`/`.finf/App` (resource) - `unar` extracting an archive or Mac OS copying to a filesystem that does not support forks (e.g. FAT32)
+- Executor - `App` (data), `%App` (resource) - a similar format to AppleDouble
+- Native MacOS - `App` / `App/..namedfork/rsrc` - macOS as host, a correctly copied app with resource fork intact
+- HFS / HFS+ disk image - `.dsk`, `.img`, `.image`, `.hfs`, `.iso`, `.cdr`, `.toast` - raw images, DiskCopy 4.2 floppy images (800K and 1.4MB HFS, 400K MFS), HFS and HFS+ CD images, with or without partition tables. CD images can contain the full 2352-byte sectors.
+- MOOF floppy image - `Disk.moof` - Applesauce format, imaging a 400K or 800K floppy's exact magnetic timings.
+
+For AppleDouble and the emulator folders, you can specify just the data-fork variant filename (`App`). The corresponding Resource fork will then be automatically located.
 
 ### Checking a file
 
 ```sh
-python -m macrt Game.bin --list
+macrt Game.bin --list
 ```
 
-`--list` prints the file's type and creator and every resource it holds,
-then exits. For menus, windows, dialogs, `SIZE` and `vers` resources it
-also says what they contain. It's the quickest way to check that an
-application arrived with its resource fork: a `CODE` line means there is
-68k code to run.
+`--list` prints the file's type and creator code, along with a list of every resource.
+
+For menus, windows, dialogs, `SIZE` and `vers` resources it also decodes them. This provides a convenient way to tell that an application is usable - `CODE` resources likely indicate the app has 68k code to run.
 
 ```
-$ python -m macrt tests/apps/Hello.bin --list
+$ macrt tests/apps/Hello.bin --list
 Hello: application, type 'APPL', creator 'HELO'
   data fork 0 bytes, resource fork 1,007 bytes, 6 resources
   CODE      0       24  purgeable,locked,preload '' jump table, 1 entries
@@ -173,66 +238,41 @@ Hello: application, type 'APPL', creator 'HELO'
   SIZE     -1       10                     256K preferred, 128K minimum
 ```
 
-Each line gives the resource's type, ID, size in bytes, attributes and
-name, then what it holds.
+In order: resource type, ID, size in bytes, attributes, name, and description of contents.
 
-If macrt says the file *has no resource fork*, the fork was lost on the way.
-Go back to the archive or disk image it came from. If it says the
-*resource fork is in its data fork*, something copied the file without
-keeping its two forks apart, and a Mac couldn't launch it either. McBug on
-both BMUG PD-ROM discs was mastered like this.
+If Classetta says the file has no resource fork, the application will be unusable.
 
 ### Archives
 
-Most Mac software online is in an archive: `.sit` (StuffIt), `.cpt`
-(Compact Pro), `.sea` (self-extracting), `.sit.hqx`, or a `.zip` with a
-`__MACOSX` folder. macrt doesn't unpack archives; it tells you when you've
-given it one. Unpack it with The Unarchiver, which keeps the resource
-forks:
+Most Mac software online is distributed in an archive: `.sit` (StuffIt), `.cpt` (Compact Pro), `.sea` (self-extracting), `.sit.hqx`, or (uncommon for Classic Mac apps) a `.zip` with a `__MACOSX` folder.
+
+macrt doesn't unpack archives. Unpack it with The Unarchiver, which will preserve the resource forks:
 
 ```sh
 unar Game.sit.hqx               # decodes the BinHex and unstuffs what's inside
 python -m macrt "Game Folder/Game"
 ```
 
-On Linux and Windows, `unar` writes each resource fork, with the file's
-type and creator, as an AppleDouble file named `App.rsrc` next to `App`.
-An application's data fork is usually empty, and then `unar` writes only
-`App.rsrc`. Give macrt either `App` or `App.rsrc`; both find the same
-file. On macOS, `unar` writes real resource forks.
+On Linux and Windows, `unar` writes each resource fork, along with with the file's type and creator, as an AppleDouble file named `App.rsrc` next to `App`.
 
-Don't use `unzip` on a zip from a Mac: it leaves the resource forks in the
-`__MACOSX` folder, away from their files. `unar` puts them back together.
+An application's data fork is usually empty, in this case `unar` may write only `App.rsrc`. You can point Classetta to App.rsrc. This shouldn't happen on macOS where it natively writes resource forks.
 
-For example, Vector 2.5, a small program from the Info-Mac archive:
-
-```sh
-$ curl -O https://ftp.funet.fi/pub/mac/info-mac/game/arc/vector-25.hqx
-$ python -m macrt vector-25.hqx
-  vector-25.hqx is a StuffIt archive: unpack it first, for example with The Unarchiver (unar vector-25.hqx)
-$ unar vector-25.hqx
-$ ls "vect_250 folder"
-Vector 2.5 Doc  Vector 2.5.rsrc
-$ python -m macrt "vect_250 folder/Vector 2.5"
-```
+Don't use the command line `unzip` utility on a zip from a Mac: it leaves the resource forks in the `__MACOSX` folder, separate from their files. `unar` will extract the archive in a usable fashion.
 
 ### Disk images
 
-Many collections come as disk images: floppies, CD-ROMs and hard disks.
-macrt reads HFS, HFS Plus and MFS volumes directly, so there's nothing to
-extract:
+Many collections come as disk images of floppies, CD-ROMs and hard disks. macrt can read MFS, HFS, HFS+ volume images directly, so these don't need prior extraction.
 
 ```sh
-python -m macrt "System 6.0.8.dsk"                  # a disk with one application
-python -m macrt "System 6.0.8.dsk" --app TeachText
-python -m macrt Tools.img --app "Tools:Disk Tools:Disk First Aid"
+python -m macrt "example.dsk"                  # a disk with one application
+python -m macrt "System 6.0.8.dsk" --app TeachText  # specify which app to run by name
+python -m macrt Tools.img --app "Tools:Disk Tools:Disk First Aid" # specify an app by path.
 python -m macrt Paint.dsk                           # a 400K MFS floppy from 1984
 ```
 
-`--app` takes the application's name, or its Mac path with folders
-separated by colons, starting from the disk's name or from any folder
-below it. Names are matched without regard to case. Run a disk that holds
-several applications without `--app`, and macrt lists them:
+`--app` takes the application's name, or a colon separated path. Names will be matched as a suffix on any path, so a subfolder name can be specified, it does not necessarily have to start from the disk's root. Names are matched case insensitive.
+
+If a disk with more than one application is specified without the `--app` parameter, you will get a list of all the applications on the disk.
 
 ```
 $ python -m macrt mac6-0-8.dsk
@@ -246,250 +286,97 @@ $ python -m macrt mac6-0-8.dsk
   Mac System 6.0.8:TeachText
 ```
 
-When two applications have the same name, as the two TeachTexts do here,
-`--app TeachText` takes the one nearest the top of the disk
-(`Mac System 6.0.8:TeachText`). Give more of the path to get the other:
-`--app "LabelWriter II Folder:TeachText"`.
+When two applications have the same filename, e.g. `--app TeachText`, Classetta will use the first one it finds (`Mac System 6.0.8:TeachText`). Specify a more complete path if you want the other one.
 
 #### Image formats
 
-macrt reads raw images and DiskCopy 4.2 images, including images of
-partitioned disks (an Apple partition map with an HFS or HFS Plus
-partition). A CD's image can also keep the disc's sectors whole, 2352
-bytes each, starting with their sync and header (ECMA-130); macrt takes
-the 2048 bytes of data in each (after the header in a mode 1 sector, and
-after 8 more bytes in a mode 2 one) and mounts the result as a CD-ROM,
-whatever the image is called.
+Classetta can read raw images as well as DiskCopy 4.2 images.
 
-macrt can't read compressed images yet: NDIF (DiskCopy 6) and UDIF
-(`.dmg`, `.smi`). Convert them to a raw image first.
+Full-drive images including partition table (an Apple partition map with an HFS or HFS Plus partition) are supported.
+
+Whole sector CD images (2352 byte sectors) are also fully supported.
+
+Not supported: compressed images, particularly NDIF (DiskCopy 6) and UDIF (`.dmg`, `.smi`). You will need to convert these to an uncompressed raw image.
 
 #### CD-ROM images
 
-An image whose name ends in `.iso`, `.cdr` or `.toast` is mounted as a
-CD-ROM, whatever its size. Its driver has a device control entry in the
-unit table, named `.AppleCD`, the Apple CD-ROM driver's name in Technical
-Note DV 22, "CD-ROM Driver Calls", so a program that checks its disc's
-driver by name finds it, as Lode Runner: The Legend Returns does. The
-image is taken to be the disc's one data track, starting at 00:02:00: the
-driver gives its table of contents (`ReadTOC`), answers the audio calls
-with `paramErr`, as the Note has them for a data track, and keeps the
-volume `AudioControl` sets for `ReadAudioVolume`. macrt doesn't make up
-audio tracks an image hasn't got, so a program that plays music from its
-disc's audio tracks gets those errors.
+Images ending in `.iso`, `.cdr` or `.toast` will be mounted as a CD-ROM.
 
-The volume says it's locked by hardware: bit 7 of its attributes
-(`vcbAtrb` in its volume control block, and `ioVAtrb` from `PBGetVInfo`),
-"Set if the volume is locked by hardware" in Inside Macintosh: Files
-("Volume Control Blocks"), is set, as Technical Note FL 530 ("File Manager
-Volume Handling Q&As") says a CD-ROM's is, and macrt takes no changes to
-it: making, deleting, renaming or moving a file or folder, changing a
-file's information or opening one to write says `wPrErr`, the File
-Manager's error for a volume locked by hardware, and a file opened with
-`fsCurPerm` is opened to be read. Treasure Galaxy! tells its disc from a
-hard disk by whether it can make a file on it.
+The driver has a device control entry in the unit table, named `.AppleCD`, for compatibility with apps (e.g. Lode Runner: The Legend Returns) which probe the driver to determine that it's a "real" CD-ROM. does.
 
-An image named any other way (`.img`, `.dsk`, `.image`, `.hfs`) is a
-floppy up to 1.4MB and a hard disk above that, with no driver in the unit
-table, since an HFS CD-ROM's image holds nothing that says it came from a
-CD.
+The image is treated as the disc's single data track. Hybrid images with data and CD Audio are not supported.
 
-#### HFS Plus
+The CD's volume will report that it's locked by hardware (as per Technical Note FL 530 "File Manager Volume Handling Q&As"). No modification of any files will be allowed.
 
-HFS Plus is the format Technote 1150 ("HFS Plus Volume Format") describes,
-introduced with Mac OS 8.1; some later CDs of earlier software use it.
-macrt reads an HFS Plus volume, or one inside an HFS wrapper (TN1150's "HFS
-Wrapper"), into the same form as an HFS one, so a program sees it as an
-ordinary HFS volume. A hard link (TN1150's "Hard Links") is the file it
-links to, and the folder of linked files is left out. Dates are given in
-local time, as HFS keeps them (TN1150's "HFS Plus Dates"). An HFS Plus name
-can be 255 Unicode characters, and an HFS one is 31 characters of Mac Roman
-with no colon in it: a name that can't be written that way, or that would
-then be the same as another in its folder, is cut short and given its
-file's or folder's catalog node ID in hexadecimal, as in
-`A Name Far Too Long For An H#16`, so that every file has a name of its
-own. That rule is macrt's own.
+An file with any other extension (`.img`, `.dsk`, `.image`, `.hfs`) that's not detected as an archive, will be treated as a floppy disk image if it is less than or equal to 1.4MB.
 
-#### Floppies, track by track
-
-It also reads Applesauce's MOOF images of 400K and 800K floppies. These
-keep each track as the bits the drive reads, as the moof-a-day
-collection keeps its floppies; macrt decodes them back to sectors, the
-way a Mac's floppy drive does, when it opens one. A sector that can't be
-read is left as zeros, and a program that reads it through the floppy disk
-driver is told it can't be read, as on a Mac. A few keep a track instead
-as the flux changes Applesauce timed going by, where bits can't say what's
-there; macrt reads those as a Mac's floppy controller would. MOOF images
-of 1.4MB floppies aren't read: convert them to a raw image first.
-
-A raw or DiskCopy image of a 400K or 800K floppy has only the sectors,
-not the tracks, and macrt gives the drive the tracks a Mac's format
-would have written for them: each sector's address field and data
-field, two sectors apart round the track. A program that reads the disk
-itself finds what it would on a copy of the disk: MacGolf's copy
-protection reads a sector with a routine of its own that reads only the
-sector's marks, and leaves the sector where it was. Since the image
-didn't keep the marks, the ROM's routine reads a data field with whatever
-marks a program gives it: The Slide Show Magician reads its key file
-through marks its master disk has there.
+Above that size, it will be used as a hard disk. To the app there will be no reported driver in the unit table (unlike CD-ROM images).
 
 #### MFS disks
 
-MFS disks are the 400K floppies of System 1 to 4, from 1984 to 1987: the
-first MacPaint and MacWrite disks, and most early games, came on them.
-MFS has no folders of its own. The folders you saw in the Finder were kept
-in its Desktop file, and applications never saw them, so macrt puts every
-file at the top of the disk and `--app` takes just the name. An
-application on an MFS disk sees an ordinary HFS volume, as it would have
-on a Mac Plus.
+MFS (Macintosh File System) predates HFS/HFS+ (Hierarchical File System). This is the filesystem used on 400K floppies under very early system versions (HFS was first provided with System 2.1. MFS was made read-only in Mac OS 7.6.1 and dropped entirely with Mac OS 8). The first MacPaint and MacWrite disks and most early games were shipped on disks in this format.
+
+MFS does not actually support paths / hierarchies. Although the Finder will show files in folders, this is actually an illusion created by the Finder itself - it stores the path of each file in the Desktop file. Applications tended not to read this and just present every file on disk in a flat list.
 
 #### Disks that start up into a game
 
-A few early games took the Finder's place on their disk, so that a Mac
-started from it went straight into the game. Given a disk without
-`--app`, macrt runs the program the disk starts up into, as its boot
-blocks name it, when that isn't Apple's Finder, and otherwise the disk's
-only application.
+A few early games shipped a bootable system without a Finder. A Mac started off that disk would boot directly into the game.
 
-#### Copy protection
+If such a disk image is provided, and a non-Finder application is specified in the disk's Boot Blocks, Classetta will start this application without needing to specify `--app`.
 
-Some early programs check that they're on their original floppy, by
-reading marks a copier can't copy. From a MOOF image, which keeps what's
-on each track:
+#### Floppies, track by track
 
-- A check that reads through the floppy disk driver gets what's on the
-  original, and so does one that puts its own routine in the driver's
-  place to read past a sector's address field, as Excel 1.0 does, or to
-  give the ROM's routine marks of its own to look for, as Dollars and
-  $ense and PFS:FILE do.
-- A check that times the disk as it turns, through the ROM's routines that
-  find each sector's address field as it comes round and step the head, as
-  Mac Attack's does, sees the original's timing: the disk turns at the
-  speed its zone of tracks did.
-- Where a track goes on long with no flux change, the drive reads noise
-  there, different bits each time, and a check that reads it twice, as
-  Q-Sheet's does, sees that it's the original; a few zeros together the
-  drive reads as written, so a check that counts a turn of a track whose
-  bytes are further apart than a disk's own, as The Ancient Art of War's
-  does, counts what the original gives.
-- A check that steps the head itself and counts the bytes the floppy
-  controller reads from the track it moved to, as PageMaker's does a track
-  in from its key sector, sees them go by as the disk turns, and one that
-  times them with the VIA's timer, as Jazz's does, counts what the
-  original gives: the VIA and the drives keep one clock.
-- A check whose own routine reads a sector bit by bit as the floppy
-  controller shifts them in, as Shufflepuck Cafe's does, sees the
-  original's bits too. It stops the shifting for as long as its own
-  instructions take, and macrt counts what each instruction would take a
-  Mac, so the same bits go by unread as on the original.
-- A check with its own routine to find a sector's address field, as
-  Dragonworld's has, is called for each sector the driver reads.
-- A key track whose flux changes come a bit cell and a half apart, as
-  Fraction Action's, MathTalk's and KidTalk's do, reads differently each
-  time, as on the original: the floppy controller reads each such change
-  as one cell after the last or two, as it comes a little early or late,
-  and their check reads the track twice and sees the difference that a
-  copy, written as bits, can't have.
-- A check that steps the head through the drive's registers, waits through
-  the ROM's WakeUp and expects a given sector next, as Moebius's does,
-  sees the skew from one track to the next that the original has: the
-  drive says at once that a step is over, and the disk driver's step and
-  settle times, which WakeUp waits for, are 12 and 30 ms. Those are
-  macrt's choice, within what such a check allows, not times known from
-  the ROM.
+Classetta can also read Applesauce MOOF images of 400K and 800K floppies. These preserve each track as the raw magnetic flux transitions the drive reads. The moof-a-day collection keeps its floppies in this format - Classetta will decode them back to sectors, in the same way a real Mac's disk drive would. A sector that can't be correctly interpreted will be loaded as all zeros, and a program that uses the normal floppy disk calls will receive a read error.
 
-Other checks that drive the floppy drive's hardware themselves still fail:
-the program shows its own "damaged disk" or "not an original" alert, or
-asks for its master disk.
+A few MOOF images preserve invalid magnetic data - Classetta interprets them as close to a real Mac's floppy controller as it can.
+
+MOOF images of 1.4MB floppies are not supported - convert them to a raw disk image first.
+
+A raw or DiskCopy image of a 400K or 800K floppy has only the data from sectors, without any information as to where track boundaries would lie. Classetta determines what track they would have been present on as best it can. A program that performs low level reads of the disk should find what it's expecting to see.
+
+Why is this useful? Here are the scenarios that have been tested:
+
+- Attempting to read directly from the floppy disk controller should always give an identical result to the original.
+- Some apps such as Excel 1.0 modify the OS's disk read routine or use it to read other information on disk.
+- Some apps try to determine that they see identical timing (rotation speed) to an original Mac floppy drive - these should see what they expect (Mac Attack).
+- When the track has no flux change recorded for greater than the maximum allowed interval, a real drive will start to read random bits in that location. Some applications are deliberately mastered with a disk that has this on some sectors. The app will try reading this sector multiple times to check whether it differs on each read (Q-Sheet).
+- Some alter the bit spacing on the disk and check the timing changes between this and other parts of the disk (The Ancient Art of War).
+- Some apps will step the head to another track mid-read and examine the byte stream to determine how the tracks are physically aligned with each other (PageMaker, Jazz).
+- Some apps read the raw bits from the floppy controller as they pass under the read head (Shufflepuck Cafe). The bits will go by at the correct speed.
+- An app with its own routines to find a sector's address field (Dragonworld) will be correctly called for each sector the driver reads.
+- A key track whose flux changes are 1.5 bits apart will also read differently each time (Fraction Action, MathTalk and KidTalk).
+- Some apps the head directly through the drive's registers, and then wait using the WakeUp call in the ROM, expecting a specific sector to follow (Moebius).
+- Some apps check that disk step/settle times are reasonable (Classetta emulates 12 and 30 ms).
+
+Some apps that do more intensive checks on the floppy drive's hardware may still fail, with a few programs reported as showing a "damaged disk" or "not an original" alert.
 
 ### Where to find software
 
-Use software you have the right to run. Apple's own system disks, such as
-System 6.0.8, are a good first test: they include TeachText and a few
-small utilities. The Info-Mac archive, mirrored for example at
-`https://ftp.funet.fi/pub/mac/info-mac/`, holds thousands of freeware and
-shareware programs as `.hqx` files: unpack them with `unar` as above.
-Small black-and-white programs are the likeliest to run. The Internet
-Archive keeps images of many original 400K floppies, as raw `.dsk` or
-DiskCopy images that macrt opens as they are, and as MOOF images in its
-moof-a-day collection, about 150 early Mac titles. Its Macintosh Software
-Library holds many more, as DiskCopy images (`.dc42`, `.img`) or raw
-`.dsk` files; where an item has several, one named `00playable` is the
-disk to start from.
+Please run only software you have the right to run.
 
+Apple's own system disks, such as System 6.0.8, are a good first test: they include TeachText and a few small utilities.
 
-## Running it
+The Info-Mac archive, mirrored at `https://ftp.funet.fi/pub/mac/info-mac/`, holds thousands of old freeware and shareware programs as `.hqx` files.
 
-```sh
-python -m macrt FILE... [--app NAME]... [options]
-```
+Small black-and-white programs are most likely to be compatible.
 
-| Option | What it does |
-| --- | --- |
-| `--app NAME` | Picks the application on a disk image, by name or Mac path. A document's name launches the application that made it, with the document open (see [Opening a document](#opening-a-document)). Repeat it to run several. |
-| `--list` | Lists the file's resources and exits. |
-| `--view` | Shows the application's menus, windows and dialogs from its resources, without running its code. Useful when the code won't run. |
-| `--trace-traps` | Logs every Toolbox and OS trap the application calls. |
-| `--debug` | Opens the debugger window, in MacsBug's grammar. See [The debugger, and MCP](debugger.md). |
-| `--mcp` | Answers the debugger over MCP on localhost, so a client like Claude Code gets the same thing. See [The debugger, and MCP](debugger.md). |
-| `--log FILE` | Writes the whole log -- traps, function traces, everything -- to FILE as well as the screen. The screen keeps the colours; FILE gets plain text. |
-| `--system FILE` | Uses a real System file, or a disk image holding one, in place of macrt's own small one. See below. |
-| `--host desktop` | Each Mac window is a window on your desktop, with one menu bar for the front application. This is the default. |
-| `--host screen` | Everything is drawn inside one window that is the Mac's screen. |
-| `--menubar global` | One menu bar, the front application's. This is the default. |
-| `--menubar window` | A menu bar under each window's title bar. |
-| `--size WxH` | The Mac screen's size, such as `512x342` or `640x480`. The default is your screen's size with `--host desktop`, and 640×480 with `--host screen`. |
-| `--speed N` | Runs 68k code at about N times a Mac Plus's speed, by the cycles its instructions would take a 68000. Games from 1984 time themselves by how fast the processor goes, and are unplayable at full speed; `--speed 1` is a Mac Plus. The Toolbox's routines, which macrt runs itself, aren't slowed, and above about 3 the counting can't keep up. The default is as fast as it goes. |
-| `--memory K` | Gives the application K kilobytes of memory, in place of what its `SIZE` resource asks for, as the memory size in the Finder's Get Info does. A `SIZE` resource from before MultiFinder can ask for too little: the Finder of the time gave an application all the memory there was. A control panel runs in the memory of the program that hosts it, so its size goes to the application it launches from its own file, as After Dark 4.0's Demo does. |
-| `--no-sound` | Keeps the Mac's sound off your computer's speakers. See [Sound](#sound). |
-| `--record-sound FILE.wav` | Writes the Mac's sound to a WAV file as it plays, as well. |
-| `--model plus` | Says the Mac is a Mac Plus, with a 68000 and no floating-point unit. This is the default. Programs from before the Mac II need it: a 68000's exception frames are smaller than a 68020's, and MacWrite 4.5 pops its own. |
-| `--model ii` | Says the Mac is a Mac II, with a 68020 and a 68881, for a program that needs one. The instructions run are the same either way. Some games pick how to draw by the processor: on a 68000 they draw straight into the screen's memory as if it were a 512×342 Mac's, which on a bigger screen puts their picture in the wrong place. Give them `--model ii`, or `--size 512x342`. A Mac II's screen is in colour: see `--depth`. |
-| `--model iix` | Says the Mac is a Mac IIx, with a 68030 and a 68882, for a program that asks for one, such as Fine Artist; otherwise it's the Mac II above, with its colour screen. The instructions run are still the same, and Gestalt says there's no memory management unit. |
-| `--depth N` | With `--model ii` or `iix`, the screen's bits a pixel: 1, 2, 4 or 8 for that many bits of an index into the screen's colour table, 16 or 32 for colours themselves. The default is 8, 256 colours. A Mac Plus's is 1, black and white. |
-| `--row-bytes N` | How many bytes apart the screen's rows are in its memory at the depth it starts at, as if its memory were wider than what shows; when a program changes the depth, they're as many pixels apart as before (with `--depth 8 --row-bytes 1024`, 128 bytes at 1 bit a pixel, 512 at 4). QuickDraw says how far apart they are (`screenBits.rowBytes`, and the `rowBytes` of the screen's `PixMap`), and most programs that draw straight into the screen ask it; a few take the rows to be some fixed number of bytes apart instead, and draw each row in the wrong place unless the screen's are so far apart. The default is as few as a row needs: 80 for a 640-pixel row at 1 bit a pixel, 640 at 8. |
-| `--classic-menus` | Menus stay open only while the mouse button is held, as before System 7. |
-| `--rainbow` | Shows the striped Apple logo in the menu bar. |
-| `--single` | With no file, runs only the demo's Sampler, not its Ticker too. |
+The Internet Archive keeps images of many original 400K floppies, as raw `.dsk` or DiskCopy images as well as MOOF images in the moof-a-day collection of about 150 early Mac titles.
 
-Quit an application from its own File menu, or close macrt. Ctrl+C in the
-terminal quits macrt and everything running in it.
+Its Macintosh Software Library holds many more, as DiskCopy images (`.dc42`, `.img`) or raw `.dsk` files. Where an item has several options, the one named `00playable` is the best option.
 
-On a PC keyboard, **Ctrl** is the Mac's Command key (⌘), **Alt** is Option,
-and the Windows or Super key is Control. On a Mac keyboard, the keys are
-the Mac's own.
+## Keyboard
 
-The keys have the key codes of the modelled Mac's keyboard. A Mac Plus's
-arrow keys are $46, $42, $4D and $48, the codes its keypad's +, *, / and =
-send with Shift; a Mac II's ADB keyboard has $7B to $7E for them. The
-keypad's keys have codes of their own, apart from the same digits on the
-main row, for games that steer by the keypad. While an arrow key is down,
-it is in the `KeyMap` by both keyboards' codes, since games written for
-the one keyboard read the other's.
+<!-- TODO for this section: validate the part about keyboards. Not sure it would be detecting a Mac keyboard so much as the host being Mac OS? -->
+
+When using a PC keyboard, **Ctrl** is mapped to Command (⌘), **Alt** is mapped to Option, and Windows/Super is Control. On a Mac keyboard, modifier keys are left as-is.
+
+There are some keys which differ per model:
+
+The Mac Plus's keyboard, which pre-dates ADB keyboards sends arrow keys are $46, $42, $4D and $48 (which are identical to keypad +, *, / and = with Shift held down). On the other hand, other Mac models have an ADB keyboard which sends arrow keys as $7B to $7E.
+
+Currently this discrepancy is handled by setting both keycodes at once.
 
 ### Several applications at once
-
-```sh
-python -m macrt Hello.bin Dialogs.bin
-python -m macrt mac6-0-8.dsk --app TeachText --app "Creepy Castle™"
-```
-
-Every file you name is launched, in order. When disk images are among
-them, each `--app` is looked for on the images in turn and taken from the
-first one that has it. Without `--app`, each image gives its only
-application, unless an application file is among the files you name: the
-images are then its disks, as a CD is for a copy of its program on the
-Mac's own disk.
-
-An image nothing is launched from, one with no application on it or, with
-`--app`, none of the names, is a disk of documents. Every image is in a
-drive from the start, the first in the internal drive, so a game on two
-floppies finds its second disk when it asks for it by name, or puts it in
-through a volume control block of its own, as Uninvited does:
-
-```sh
-python -m macrt "BDC 1.moof" "BDC 2.moof" --app "Beyond Dark Castle" --host screen
-```
 
 A program that ejects a floppy gets it back a second later, as if you had
 put it back in. The drive then posts a disk-inserted event, and the disk

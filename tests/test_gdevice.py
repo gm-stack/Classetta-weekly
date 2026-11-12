@@ -16,10 +16,12 @@ from macrt.m68k.glue_os import (QD32TRAP, SLOT_TRAPS, UNIMPLEMENTED, VIDEO_DEFAU
 from macrt.toolbox import gdevice, lowmem, pixels
 from macrt.toolbox.color import CT_DEVICE, STANDARD_8BIT, standard_table
 from macrt.toolbox.gdevice import (ITAB_RES, PIXMAP_FLAG, GDevice, PixMap, allInit, apart,
-                                   deref, gdDevType, mainScreen, make_itable, noDriver,
-                                   read_table)
+                                   clutType, deref, gdDevType, mainScreen, make_itable,
+                                   noDriver, read_table, screenActive)
 from macrt.toolbox.memmgr import noErr
-from macrt.toolbox.types import Rect
+from macrt.toolbox.qdraw import ink, patCopy, read_rgn
+from macrt.toolbox.types import Point, Rect
+from PyQt6.QtCore import QPoint
 
 from conftest import Recorder
 from guest import Guest, Room
@@ -663,4 +665,141 @@ def test_depth_needs_a_colour_model(capsys):
     assert parse_args(["--depth", "1", "x"]).depth == 1
     with pytest.raises(SystemExit):
         parse_args(["--depth", "8", "x"])
-    assert "depth needs a model with a colour screen" in capsys.readouterr().err
+
+    assert "needs a model with a colour screen" in capsys.readouterr().err
+
+
+# -- more than one screen ------------------------------------------------------
+
+def screens3():
+    return Guest(model="ii", depth=8, screens=3)
+
+
+def test_three_screens_hang_from_the_main_device(qapp):
+    g = screens3()
+    assert len(g.system.devices.screens) == 3
+    chain, gdh = [], g.mem.r32(lowmem.DeviceList)
+    while gdh:
+        chain.append(gdh)
+        gdh = GDevice(g.mem, deref(g.mem, gdh)).next_gd
+    assert chain == g.system.devices.screens       # CopyBits' head: the main device
+    gds = [GDevice(g.mem, deref(g.mem, gdh)) for gdh in chain]
+    assert gds[0].id == -1 and gds[0].ref_num == -49      # the main screen's card
+    assert gds[1].id == 0x2a and gds[2].id == 0x2b        # their slots' gdIDs
+    for gd in gds[1:]:
+        assert not gd.flags & (1 << mainScreen) and gd.ref_num == 0   # no driver of its own
+    w = g.system.screen.bounds.width
+    for i, gd in enumerate(gds):
+        assert gd.rect == Rect(0, w * i, g.system.screen.bounds.bottom, w * (i + 1))
+        pm = PixMap(g.mem, deref(g.mem, gd.pmap))
+        assert pm.bounds == gd.rect               # the PixMap's in globals too
+
+
+def test_three_screens_are_in_the_scrn_resource(qapp):
+    g = screens3()
+    scrn = g.system.devices.scrn()
+    (count,) = struct.unpack(">H", scrn[:2])
+    assert count == 3
+    w = g.system.screen.bounds.width
+    size = struct.calcsize(">hhLhHHhh4hH")
+    for i in range(3):
+        row = struct.unpack(">hhLhHHhh4hH", scrn[2 + size * i:2 + size * (i + 1)])
+        _, slot, base, _mode, _mask, flags, gd_id, _gamma, top, left, bottom, right, _ctl = row
+        assert slot == 9 + i
+        assert gd_id == -1 if i == 0 else gd_id == 0x29 + i
+        assert (left, right) == (w * i, w * (i + 1))
+        assert flags & (1 << gdevice.screenActive)   # every card's screen is active
+        assert bool(flags & (1 << mainScreen)) == (i == 0)
+        # Each screen's buffer is there: a buffer row's worth of heap.
+        assert g.mem.read(base, 8) == b"\x00" * 8
+
+
+def test_the_desk_is_the_whole_desktop_and_painted_on_every_screen(qapp):
+    g = screens3()
+    system = g.system
+    gray = read_rgn(system.mem, system.mem.r32(lowmem.GrayRgn))
+    w = system.screen.bounds.width
+    assert gray.bbox == Rect(0, 0, system.screen.bounds.bottom, w * 3)
+    # The buffers: room apart, below the main one, none of them the desk yet.
+    extra = system.screen.extra
+    assert len(extra) == 2
+    for i, s in enumerate(extra, 1):
+        assert s.base == system.screen.base - system.screen_room * i
+        assert s.row_bytes == system.screen.row_bytes
+    assert system.screen.extra_drawn == [False, False]   # unwritten: nothing to show yet
+    system.screen.paint_desk(None, ink(bytes([0x11, 0x22] * 4), patCopy)[0])
+    assert system.screen.extra_drawn == [True, True]     # the desk shows on every screen
+    first = system.screen.bits.mem.r8(system.screen.bits.base)
+    for s in extra:
+        # The one desk, in every screen's buffer: the same bytes top-left.
+        assert s.mem.r8(s.base) == first
+
+
+def test_a_program_writing_in_an_extra_buffer_shows_there(harness):
+    h = harness(model="ii", depth=8, screens=3)
+    system = h.d.system
+    s = system.screen.extra[0]
+
+    def shown(x):
+        c = h.d.extra_screens[0].grab().toImage().pixelColor(x, 0)
+        return (c.red(), c.green(), c.blue())
+
+    before = [shown(0), shown(1)]      # the desk brush, before the buffer shows
+    with system.lock:
+        system.mem.w8(s.base + 1, 0xFF)            # one pixel's byte, top-left of screen 2
+        system.screen.look()
+
+    h.wait_until(lambda: shown(1) != before[1], timeout=3)
+    # The buffer's own pixels show here, not the desk brush: the poke
+    # changed pixel 1, and pixel 0 holds the buffer's 0x00, unchanged.
+    assert shown(0) == before[0]
+    # and not on the main screen: its pixel there is the desk's, unchanged
+    first = h.d.screen_widget.grab().toImage().pixelColor(1, 0)
+    assert (first.red(), first.green(), first.blue()) == (0, 0, 0)
+    # The screens are host windows side by side, so a host point is a Mac
+    # global: mouse mapping needs no per-screen case.
+    w = system.screen.bounds.width
+    assert h.d.mac_from_global(
+        h.d.extra_screens[0].mapToGlobal(QPoint(10, 20))) == Point(20, w + 10)
+
+
+def test_device_enumeration_spans_the_screens(qapp):
+    """GetMaxDevice names the screen a rectangle reaches (the main screen
+    first when it reaches more than one), and DeviceLoop goes through the
+    drawingRgn to each screen it reaches: the way a Panorama program finds
+    the buffers to draw in."""
+    g = screens3()
+    w, h = g.system.screen.bounds.width, g.system.screen.bounds.bottom
+    gdh, second, third = g.system.devices.screens
+    assert g("GetMaxDevice", g.rect_ptr((0, 0, 10, 10))) == gdh     # the main screen's
+    assert g("GetMaxDevice", g.rect_ptr((0, w + 100, 10, w + 110))) == second
+    assert g("GetMaxDevice", g.rect_ptr((0, 2 * w - 5, 10, 2 * w + 5))) == second
+    assert g("GetMaxDevice", g.rect_ptr((h + 10, 0, h + 20, 10))) == 0
+
+    seen = []
+    g.procs[0x50000] = lambda *args: seen.append(args)
+    g("SetRectRgn", (rgn := g("NewRgn")), w + 100, 0, w + 110, 10)   # only screen 2
+    g("DeviceLoop", rgn, 0x50000, 7, 0)
+    assert seen == [(8, GDevice(g.mem, deref(g.mem, second)).flags, second, 7)]
+    seen.clear()
+    g("SetRectRgn", rgn, 2 * w - 5, 0, 2 * w + 5, 10)   # across 2's edge: 2 and 3 both
+    g("DeviceLoop", rgn, 0x50000, 7, 0)
+    assert [c[2] for c in seen] == [second, third]
+    seen.clear()
+    g("DeviceLoop", g("NewRgn"), 0x50000, 7, 4)          # allDevices: every screen
+    assert [c[2] for c in seen] == [gdh, second, third]
+    assert [c[0] for c in seen] == [8, 8, 8]
+
+
+def test_the_screens_share_their_depth_and_colours(qapp):
+    g = screens3()
+    system = g.system
+    assert system.devices.set_depth(4, 80)
+    for gdh in system.devices.screens[1:]:
+        gd = GDevice(g.mem, deref(g.mem, gdh))
+        pm = PixMap(g.mem, deref(g.mem, gd.pmap))
+        assert gd.type == gdevice.clutType and pm.pixel_size == 4
+        assert gd.mode == 0x80 + gdevice.DEPTH_MODES[4]
+        main_pm = PixMap(g.mem, deref(g.mem, GDevice(g.mem, deref(g.mem, system.devices.main)).pmap))
+        assert read_table(g.mem, pm.pm_table)[1] == read_table(g.mem, main_pm.pm_table)[1]
+

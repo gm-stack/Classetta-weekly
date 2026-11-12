@@ -105,6 +105,10 @@ class Screen:
         # can show or hide a window by setting its visible flag itself, with
         # no ShowWindow or HideWindow to say so (called with the lock held).
         self.on_layout: Callable[[], None] | None = None
+        # The Display's, for each screen that isn't the main one: like
+        # on_desk, for its buffer, in that buffer's own coordinates
+        # (its host window's: the screens are laid out side by side).
+        self.on_extra_desk: list[Callable[[Rect], None] | None] = []
         self.closed = False             # the Display has gone: nothing more to show
         alt = system.alternate_screen
         self.alternate = (MemorySurface(self.mem, alt, self.row_bytes, self.bounds)
@@ -113,6 +117,48 @@ class Screen:
         self.shown = self.bits          # the buffer the desk and bar show
         self._alt_seen = b""            # the alternate buffer, last we looked
         self._bar_img: QImage | None = None     # the menu bar, as DrawMenuBar last drew it
+        # The other screens: buffers of their own, for the same desk;
+        # each keeps its own seen, and its own place in the host's
+        # coordinates (Display.screens, the host windows for the rest).
+        self.extra = []
+        if system.devices is not None and len(system.devices.screens) > 1:
+            for gdh in system.devices.screens[1:]:
+                pm = system.devices.pixmap(gdh)
+                if pm is None:
+                    continue
+                rect = pm.bounds
+                self.extra.append(MemorySurface(self.mem, pm.base_addr & self.mem.addr_mask,
+                                                pm.row_bytes & 0x3FFF, rect,
+                                                self.depth, self.devices.table()))
+        self.extra_seen = [bytearray(self.mem.read(s.base, s.bounds.height * s.row_bytes))
+                           for s in self.extra]
+        # The screens' buffers, where programs and the debugger can see
+        # them: what Classetta mirrors to each host screen.
+        if len(self.extra) > 0:
+            print("macrt: screens:",
+                  ", ".join(f"{s.base:#08x} ({s.bounds.width}x{s.bounds.height}, "
+                            f"{s.row_bytes} a row)" for s in self.bufs),
+                  flush=True)
+        # Whether each extra screen's buffer holds desk or program pixels
+        # to show (false while it's unwritten), the desk_drawn of these.
+        self.extra_drawn = [False] * len(self.extra)
+        # The desktop: the screens together, in global coordinates (as
+        # GrayRgn's bounds are).
+        bufs = [self.bits] + self.extra
+        self.desktop = Rect(min(b.bounds.top for b in bufs), min(b.bounds.left for b in bufs),
+                            max(b.bounds.bottom for b in bufs), max(b.bounds.right for b in bufs))
+
+    @property
+    def bufs(self) -> list[MemorySurface]:
+        """Every screen's buffer, in device order: the desk, the windows'
+        pixels and what a program writes are carried by all of them,
+        each buffer holding its own part of the global region."""
+        return [self.bits] + self.extra
+
+    @property
+    def seens(self) -> list[bytearray]:
+        """Each buffer's bytes, last we looked."""
+        return [self.seen] + self.extra_seen
 
     def set_depth(self) -> None:
         """The screen's depth has changed (System.set_depth): show the
@@ -128,6 +174,18 @@ class Screen:
             self.bits.match = self.devices.matching()
             self.shown = self.bits
             self.over_bar = Region()
+            # The extra screens follow the main one's depth.
+            self.extra = []
+            for gdh in self.devices.screens[1:]:
+                pm = self.devices.pixmap(gdh)
+                if pm is not None:
+                    self.extra.append(
+                        MemorySurface(self.mem, pm.base_addr & self.mem.addr_mask,
+                                      pm.row_bytes & 0x3FFF, pm.bounds,
+                                      self.depth, self.devices.table()))
+            self.extra_seen = [bytearray(self.mem.read(s.base, s.bounds.height * s.row_bytes))
+                               for s in self.extra]
+            self.extra_drawn = [False] * len(self.extra)
             self._layout = None
             self._relayout()
             self._paint_desk(self.desk)
@@ -152,6 +210,7 @@ class Screen:
         the lock: a process may hold it, waiting on the GUI thread.)"""
         self.closed = True
         self.on_desk = self.on_layout = None
+        self.on_extra_desk = []
 
     def bar_drawn(self, img: QImage | None = None) -> None:
         """The menu bar has been drawn again, over what programs drew
@@ -237,6 +296,7 @@ class Screen:
             self._recolor()
             self._flip()
             self._pull()
+            self._pull_extras()
             now = time.monotonic()
             if self._stale or now - self._last >= TICK:
                 self._last = now
@@ -247,6 +307,8 @@ class Screen:
                     for w, r in self._owners:
                         self._put(w, r)
                     self.seen[:] = self.mem.read(self.base, self.size)
+                    for s, seen in zip(self.extra, self.extra_seen):
+                        seen[:] = self.mem.read(s.base, s.bounds.height * s.row_bytes)
                     if self.on_layout is not None:
                         self.on_layout()
 
@@ -259,11 +321,19 @@ class Screen:
         if table is self.bits.table:
             return
         self.bits.table, self.bits.match = table, self.devices.matching()
+        # The other screens show the same table.
+        for s in self.extra:
+            s.table, s.match = table, self.devices.matching()
         self._pull()
         for w, mine in self._owners:
             self._show(w, mine)
         if self.on_desk is not None:
             self.on_desk(self.bounds)
+        # The extras' bytes haven't changed, so _pull_extras sees nothing:
+        # their hosts are told to show the buffer afresh, in new colours.
+        for i, s in enumerate(self.extra):
+            if i < len(self.on_extra_desk) and self.on_extra_desk[i] is not None:
+                self.on_extra_desk[i](Rect(0, 0, s.bounds.height, s.bounds.width))
 
     def _windows(self) -> Iterable[WindowRecord]:
         for proc in list(self.order()):
@@ -291,7 +361,12 @@ class Screen:
         self._owned = {w.addr: r for w, r in self._owners}
         self.covered = covered
         b = self.bounds
-        self.desk = Region.rect(Rect(self.desk_top, b.left, b.bottom, b.right)).diff(covered)
+        # The desk is every screen's, the bar carved out on the main one
+        # (the others have none); windows stay on the main screen.
+        desk = Region.rect(Rect(self.desk_top, b.left, b.bottom, b.right))
+        for s in self.extra:
+            desk = desk.union(Region.rect(s.bounds))
+        self.desk = desk.diff(covered)
         return True
 
     def _shape(self, w: WindowRecord) -> tuple[Region, Region]:
@@ -318,12 +393,15 @@ class Screen:
     def _paint_desk(self, r: Region) -> None:
         if r.empty:
             return
-        box = r.bbox
-        with self.bits.painter(box) as p:
-            if p is not None:
-                p.setClipRegion(r.to_qregion())
-                p.setBrushOrigin(self.bounds.left, self.bounds.top)
-                p.fillRect(qrect(box), self.desk_brush)
+        for s in self.bufs:
+            box = r.bbox.sect(s.bounds)
+            if box.empty:
+                continue
+            with s.painter(box) as p:
+                if p is not None:
+                    p.setClipRegion(r.to_qregion())
+                    p.setBrushOrigin(s.bounds.left, s.bounds.top)
+                    p.fillRect(qrect(box), self.desk_brush)
 
     def paint_desk(self, r: Region | None, brush: QBrush) -> None:
         """The Window Manager paints the desk in r (global; None, all of
@@ -349,6 +427,15 @@ class Screen:
             if shown is not None:
                 shown(box)
             self._over_bar(r.sect(bar), shown)
+            # The desk is painted on every screen; each shows it, and its
+            # host window is told so.
+            for i, (s, seen) in enumerate(zip(self.extra, self.extra_seen)):
+                seen[:] = self.mem.read(s.base, s.bounds.height * s.row_bytes)
+                if r.sect(Region.rect(s.bounds)).empty:
+                    continue
+                self.extra_drawn[i] = True
+                if i < len(self.on_extra_desk) and self.on_extra_desk[i] is not None:
+                    self.on_extra_desk[i](Rect(0, 0, s.bounds.height(), s.bounds.width))
 
     def _flip(self) -> None:
         """Show the buffer the VIA says to: all of it, when that's changed,
@@ -390,6 +477,27 @@ class Screen:
                 shown(on_desk.bbox)
         self._over_bar(changed.sect(self._bar()), shown)
 
+    def _pull_extras(self) -> None:
+        """The other screens: what a program has written in one of their
+        buffers shows on that screen's host window; windows never live
+        there (the Window Manager keeps them to the main screen), so
+        there's nothing to show but the screen itself.  The box each
+        on_extra_desk call gets is in that screen's own buffer
+        coordinates (its host window's), not globals."""
+        for i, (s, seen) in enumerate(zip(self.extra, self.extra_seen)):
+            size = s.bounds.height * s.row_bytes
+            if self.mem.same(s.base, seen):
+                continue
+            now = self.mem.read(s.base, size)
+            changed = self._changes(now, seen, s)
+            seen[:] = now
+            if not changed.empty:
+                self.extra_drawn[i] = True
+            if not changed.empty and i < len(self.on_extra_desk):
+                on_extra = self.on_extra_desk[i]
+                if on_extra is not None:
+                    on_extra(changed.bbox)
+
     def _over_bar(self, r: Region, shown: Callable[[Rect], None] | None) -> None:
         """r (global) has been drawn over the menu bar: show it there, as
         shown says, until the bar is drawn again."""
@@ -398,12 +506,14 @@ class Screen:
             if shown is not None:
                 shown(r.bbox)
 
-    def _changes(self, now: bytes, seen: bytes) -> Region:
+    def _changes(self, now: bytes, seen: bytes, surface: MemorySurface | None = None) -> Region:
         """Where now differs from what was seen, to the byte: to the
-        pixels a byte holds, or that hold it."""
-        rb, d = self.row_bytes, self.depth
+        pixels a byte holds, or that hold it (of surface, or the main
+        screen's)."""
+        surface = surface or self.bits
+        rb, d = surface.row_bytes, surface.depth
         bands: list = []
-        for y in range(self.bounds.height):
+        for y in range(surface.bounds.height):
             at = y * rb
             a, b = now[at:at + rb], seen[at:at + rb]
             if a == b:

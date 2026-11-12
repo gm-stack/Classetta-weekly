@@ -2,101 +2,62 @@
 
 A runtime for classic Mac OS (System 1–7) applications with a PyQt6 front end.
 
-Classetta runs an application's own 68k code on an emulated CPU, catches its
-A-line traps, and answers them with a Toolbox written in Python, with Qt
-showing its windows and menus. There is no disassembly or translation
-step. The program runs as it did on a Mac, and the Toolbox it calls into
-is ours. Each application's windows sit on your desktop next to your
-other programs.
+Classetta runs a 68k application's code on an emulated CPU. Rather than using an actual Macintosh ROM to provide the Macintosh Toolbox A-traps to the application, Classetta provides a compatible implementation of the Macintosh Toolbox in Python. The user interface is predominantly implemented with native Qt components, rather than just drawn in pixels on an emulated screen.
+
+Instead of a single window for your entire virtual Macintosh, each application's window can exist as a separate native window on your host OS.
+
+Alternatively, they can also exist inside a single window for the virtual Mac's screen.
 
 ![Three 68k test applications running side by side](docs/screenshots/test-apps.png)
 
 ## What runs
 
-Real 68k applications run: TeachText, Microsoft Excel, MacWrite, MacPaint
-and Word 1.0 from 1984, and games such as Creepy Castle and Glider+
-among them. [Titles tried so far](docs/titles.md) lists each one tried
-and how far it gets.
+While development is still very much in progress, a large number of applications are already working. TeachText, Microsoft Excel, MacWrite, MacPaint and Microsoft Word 1.0 all run. Some games such as Creepy Castle and Glider+ have also been tested.
 
-- **The processor** is unicorn's 68020, in 24-bit mode, which tells
-  programs it's a Mac Plus's 68000 (or, with `--model ii`, a Mac II's
-  68020 and 68881, and with `--model iix` a Mac IIx's 68030 and 68882)
-  and stacks that processor's exception frames. The few 68020 and 68881
-  instructions unicorn doesn't have run in Python.
-- **More than 700 Toolbox and Operating System routines**, from the
-  Memory Manager to the Sound Manager:
-  - Memory, Resource, Window, Menu, Event, Control, Dialog, List,
-    Scrap, File, Device and Process Managers, TextEdit and Standard File;
-  - QuickDraw, with real regions, pictures and icons, and on a Mac II
-    Color QuickDraw: a colour screen and its video driver, colour ports,
-    pixel patterns, offscreen GWorlds, the Palette Manager and the Color
-    Picker;
-  - the Apple Event Manager, for the Open Application event and an
-    application's events to itself, and the Edition Manager's publishers
-    and subscribers;
-  - SANE's arithmetic, conversions and elementary functions, the
-    International Utilities and the Script Manager for Roman text;
-  - the Printing Manager, which prints to a PDF;
-  - the Sound Driver's three synthesizers, the Sound Manager's channels
-    and sampled sounds, and the Mac Plus's sound buffer, played through
-    your computer's speakers;
-  - MultiFinder-style switching between several applications at once.
-- **Files** in MacBinary, BinHex, AppleSingle and AppleDouble, the
-  emulators' side files, HFS, HFS Plus and MFS disk images, MOOF floppy
-  images and CD-ROM images. An application run from a folder on your
-  computer saves its documents there.
-- **Not there yet:** Apple events and PPC sessions between
-  applications; anything plugged into the serial ports, and AppleTalk;
-  the event filter and activation procedures of custom Open and Save
-  dialogs; speech. Applications that need them get as far as they can
-  without them.
+[A full list of tested apps is here.](docs/titles.md) Want to run something else? Try it and see how far it gets!
+
+## Details
+
+The [Unicorn](https://github.com/unicorn-engine/unicorn) framework is used for processor emulation.
+Depending on the configuration, it emulates either a 68000, 68020 or 68030 CPU (the latter two with a 68881 FPU).
+
+The toolbox implementation features over 700 routines (and more to come!):
+
+  - QuickDraw: regions, pictures, icons, colour ports, pixel patterns, offscreen GWorlds, palette manager and the color picker.
+  - Apple Events: the Apple Event Manager (inter-application events not yet supported).
+  - Edition Manager: pub/sub features.
+  - SANE (Standard Apple Numerics Environment): floating point arithmetic, conversions and elementary functions.
+  - Printing Manager: print jobs generate a PDF on the host.
+  - Sound Driver: three synthesizers, Sound Manager channels, sampled sounds playbacks as well as legacy direct access to the sound buffer on earlier target systems.
+  - Other managers implemented include: Memory, Resource, Window, Menu, Event, Control, Dialog, List, Scrap, File, Device, Process, TextEdit and Standard File.
+
+A MultiFinder-esque implementation is also present, allowing multiple applications to run at once.
+
+File I/O is implemented for MacBinary, BinHex, AppleSingle, AppleDouble, MFS/HFS/HFS+ disk image, MOOF floppy image and CD-ROM image. An application started from a file on the host system's disk can read and write files on the host's filesystem.
+
+Still to come: Apple Events, PPC (Program-To-Program) Toolbox Sessions, serial ports, AppleTalk, support for applications which use custom Open/Save dialogues and text-to-speech. The implementation is intended to gracefully degrade in the event unimplemented features are hit, in the hope of avoiding a crash.
 
 ## Quick start
 
 ```sh
-python -m pip install -e .              # PyQt6, unicorn, rsrcfork, machfs
-python -m macrt tests/apps/Hello.bin    # one of the small test applications
+python -m pip install -e .              # Installs dependencies including: PyQt6, unicorn, rsrcfork, machfs
+python -m macrt tests/apps/Hello.bin    # Run a small test application
 ```
 
-If Hello opens a window and a menu bar, everything macrt needs is
-installed. Then:
+If you see a window and a menu bar, everything's installed correctly.
 
 ```sh
-python -m macrt App.bin                         # MacBinary, BinHex, AppleDouble…
-python -m macrt "System 6.0.8.dsk" --app TeachText
-python -m macrt One.bin Two.hqx                 # several, side by side
-python -m macrt App.bin --view                  # its menus and windows, without its code
-python -m macrt App.bin --trace-traps           # log every trap it calls
-python -m macrt App.bin --debug                 # the debugger window (MacsBug's grammar)
-python -m macrt App.bin --mcp                   # the debugger over MCP, on localhost
+python -m macrt App.bin                            # MacBinary, BinHex, AppleDouble…
+python -m macrt "System 6.0.8.dsk" --app TeachText # Run from a disk image. Path for --app is colon separated.
+python -m macrt One.bin Two.hqx                    # Run more than one app simultaneously
+python -m macrt App.bin --view                     # Just browse an app's resources, rather than running the app.
 ```
 
-[Running a Mac application](docs/running-apps.md) has the whole story.
-
-## The demo
-
-With no file, macrt runs two guest applications written in Python against
-the same Toolbox API, which show off the window chrome:
-
-```sh
-python -m macrt                          # host windows, one global menu bar
-python -m macrt --menubar window         # each window carries its app's menu bar
-python -m macrt --host screen            # everything inside one 1-bit Mac screen
-python -m macrt --host screen --size 512x342 --classic-menus
-```
-
-**Sampler** opens every window kind from its *Windows* menu. **Ticker** is
-a clock, so there's a second app to switch to; `--single` leaves it out.
-Ctrl stands in for ⌘ (Command), Alt for Option.
-
-| Emulated screen, global menu bar | Host windows, menu bar under each title bar |
-|---|---|
-| ![](docs/screenshots/screen-global.png) | ![](docs/screenshots/desktop-window.png) |
+Further reading is provided at: [Running a Mac application](docs/running-apps.md).
 
 ## Documentation
 
-[The documentation](docs/README.md) starts with a guide to which page to
-read for what. In short:
+[An overview of the documentation](docs/README.md) is provided here:
 
 - **[Running a Mac application](docs/running-apps.md):** what to install,
   getting an application to macrt with its resource fork, every option,
@@ -122,3 +83,8 @@ read for what. In short:
 2. What [Not yet](docs/toolbox.md#not-yet) lists.
 3. More real applications, fixing whatever each one reaches first (see
    [the ones tried so far](docs/titles.md)).
+
+
+| Emulated screen, global menu bar | Host windows, menu bar under each title bar |
+|---|---|
+| ![](docs/screenshots/screen-global.png) | ![](docs/screenshots/desktop-window.png) |

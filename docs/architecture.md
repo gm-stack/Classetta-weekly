@@ -2,13 +2,12 @@
 
 Part of [the documentation](README.md).
 
-This page is for readers who know the 68000 family, the classic Mac OS
-and its Toolbox, and want to know how macrt stands in for a Mac: what
-runs the 68k code, how a trap gets to Python, where things sit in the
-Mac's memory, and how the windows on your screen follow the records in
-it. [What works](toolbox.md) then goes through the managers one at a
-time, and [Running a Mac application](running-apps.md#what-happens-at-launch)
-gives the steps of a launch.
+> [!NOTE]
+> This page assumes some knowledge of 68k Classic Mac hardware and software.
+
+This page details how the 68k code is run, how traps are handled in Python, the virtual Mac's memory map and how the PyQT6 based windows interact with the classic Mac code.
+
+It will then go on to describe the launch process of applications.
 
 - [The big picture](#the-big-picture)
 - [The processor](#the-processor)
@@ -22,11 +21,7 @@ gives the steps of a launch.
 
 ## The big picture
 
-macrt runs an application's own 68k code on an emulated CPU, catches its
-A-line traps, and answers them with a Toolbox written in Python, with Qt
-widgets standing in for what QuickDraw used to draw. There is no
-disassembly or translation step. The program runs as it did on a Mac, and
-the Toolbox it calls into is ours.
+Classetta runs the application's 68k code on an emulated CPU. This catches A-line traps which are dispatched to Python code.
 
 ```
 guest thread (one per app)                         GUI thread
@@ -40,238 +35,132 @@ guest thread (one per app)                         GUI thread
                  TrackGoAway, DragWindow… ◀── Future ◀── Trackers ◀──────────┘
 ```
 
-**One processor, shared.** The `Machine` (`m68k/runtime.py`) is the CPU
-and the trap stubs; every 68k application has a `Runner` on its own
-thread. As under MultiFinder, one application runs at a time. It holds
-the CPU while its code runs and gives it up in `WaitNextEvent`,
-`GetNextEvent` and the other calls that wait. Whoever takes it next gets
-its registers and its low-memory globals put back.
+The `Machine` in `m68k/runtime.py` implements the CPU and the trap stubs.
 
-**Guest memory is the source of truth.** A window is a 156-byte
-`WindowRecord` in the app's heap: title, port rectangles, regions, hilite
-state, zoom states. A `MacWindowView` only draws whatever the record says.
-Poke the record the way 68k code would and the widget follows on the next
-sync.
+Every running application sits inside a `Runner` on its own thread.
 
+As under MultiFinder, only one application runs on the CPU at a time. When it executes `WaitNextEvent`, `GetNextEvent` and other similar calls, it gives up the CPU and another application can then execute. Registers and low memory globals are restored when this switch occurs.
+
+Classetta reads the 156-byte `WindowRecord` structures in the app's heap to retrieve titles, port rectangles, regions, hilite states and zoom states. A `MacWindowView` then draws based on the contents of these records in the Mac's memory. This means that applications that alter these directly are still compatible.
 
 ## The processor
 
-The processor is unicorn's 68020, in 24-bit mode. Gestalt, `SysEnvirons`
-and the low-memory globals say it's a Mac Plus, with a 68000 and no
-floating-point unit, and the exception frames it stacks are a 68000's.
-With `--model ii` it's a Mac II's 68020 and 68881, and with
-`--model iix` a Mac IIx's 68030 and 68882, for which Gestalt says
-there's no memory management unit. The instructions run are the same
-whichever it is: only what the program is told, and the exception frames,
-differ. Programs from before the Mac II need a 68000's: its exception
-frames are smaller than a 68020's, and MacWrite 4.5 pops its own.
+The processor is implemented in Unicorn.
 
-The few instructions of a 68020 and a 68881 that unicorn doesn't run, or
-runs otherwise than Motorola's manual says (`CHK2` and `CMP2`, `PACK`
-and `UNPK`, packed decimal `FMOVE`, an `FMOVE` of immediate data to the
-floating-point control registers, `FSAVE` and `FRESTORE`) stop it, and
-macrt runs them in Python (`macrt/m68k/instructions.py`). Trace mode is
-run an instruction at a time.
+It currently runs in one of the following modes:
 
-**Code that writes code.** The processor translates blocks of 68k code
-and runs the translation. It notices a store into a block it has
-translated, but not into the block it's running: a page is mapped to be
-run from or written to, not both, and a store into the page it's running
-from starts the processor again at the store (see `m68k/cpu.py`).
-Microsoft Word sets a trap word a few instructions ahead and then runs it.
+`--model plus`: (default) Emulate a Mac Plus - 68000 CPU and no FPU. Compatibility with earlier apps.
+`--model ii`: Emulate a Mac II - 68020 CPU, 68881 FPU.
+`--model iix`: Emulate a Mac IIx - 68030 CPU, 68882 FPU.
 
-**Speed.** By default 68k code runs as fast as the host can run it. With
-`--speed N`, each instruction is counted by the cycles it would take a
-68000 (`m68k/cycles.py`), and the code is held to N times a Mac Plus's
-pace, for games that time themselves by the processor (see [The
-hardware](toolbox.md#the-hardware)).
+The Mac II emulates Apple's HMMU rather than a full PMMU - under Mac OS, the PMMU is only required for virtual memory (which is out of scope for Classetta).
 
+Currently all are emulated in 24 bit mode.
+
+The difference between these CPUs come in availability of certain instructions and the exception frames that are returned. Some applications require an earlier CPU as they attempt to manipulate exception frames directly.
+
+A few instructions in Unicorn's 68020/68881 do not seem to be implemented for all the ways they are used in Mac software (`CHK2`, `CMP2`, `PACK`, `UNPK`, `FMOVE` on packed decimals, `FMOVE` of immediate data to the floating-point control registers, `FSAVE` and `FRESTORE`). These have been re-implemented in Python (see `macrt/m68k/instructions.py`) and their implementation replaces Unicorn's.
+
+Support for self-modifying code is implemented as well. Unicorn features JIT (Just-In-Time translation) caching for greater performance. The processor translates blocks of 68k code into native code, and re-runs these cached blocks instead of re-translating the original each time. If it sees a write into a block it has translated, this cache will be invalidated. If it is currently running that block, execution will be halted and restarted at an appropriate point (Microsoft Word is a particular offender here - see `m68k/cpu.py`).
+
+By default 68k code is run without any artificial slowdown. The option `--speed N` will enable a mode which tallies up the number of cycles that each instruction would have taken on a real 68000 and inserts small periodic delays to limit execution speed to approximately N times the speed of a real Mac Plus's CPU (see `m68k/cycles.py`).
 
 ## Traps
 
-`cpu.run()` returns at every A-line trap. The dispatcher
-(`m68k/dispatch.py`) looks up the trap's signature in
-`m68k/trapdefs.py`, which is generated from the Multiversal interface
-files: where its arguments are (Pascal stack or registers), its result,
-and its selector for dispatched traps such as `_Pack3` or `_OSDispatch`.
-Then it calls the Python routine registered under the trap's name with
-`@trap`.
+The designers of the Motorola 68000 CPU deliberately left two large chunks of opcodes unimplemented for expansion purposes - all instructions beginning with `$A` and `$F`. The instructions beginning with `$F` were later used to perform floating point operations with an attached 68881 or 68882 FPU. The instructions beginning with `$A` were left open for system vendors to use as they like.
 
-The dispatcher decodes the trap word in two ways:
+Upon executing one of these unimplemented instructions, the CPU jumps to Vector #10 (for `$A`) or Vector 11 (for `$F`). This differs from an illegal instruction, one which Motorola has specified is invalid - these are routed to Vector #4 and will trigger a system error.
 
-- **Toolbox traps** (`$A800`-`$AFFF`) take Pascal arguments on the
-  stack: space for the result first, then the arguments left to right,
-  so the last is on top. The routine pops its arguments and leaves the
-  result. Bit 10 is auto-pop: the trap was reached by a `JSR` to glue,
-  and it returns to the address on top of the stack instead. The trap
-  number is the low 10 bits.
-- **OS traps** (`$A000`-`$A7FF`) take their arguments in registers,
-  mostly A0 and D0, and return a result in D0 (and in A0 when bit 8 is
-  set). Bits 9 and 10 are flags for the routine: SYS and CLEAR for the
-  Memory Manager, HFS and ASYNC for the File Manager. The trap number is
-  the low 8 bits. After the routine the dispatcher tests D0.W, so code
-  can branch on the result.
+The classic Mac OS makes extensive use of these instructions - using instructions from `$A` for applications to make system calls. These are known as "A-Line Traps" or simply "Traps".
 
-A known trap with nothing behind it is logged and skipped: its
-arguments are popped by its signature and it returns zero, or `unimpErr`
-for one that returns an error code. One that isn't known at all stops
-the application with system error 12, since there is no telling how much
-of the stack is its (see [When it stops](running-apps.md#when-it-stops)).
-On a Plus, whose 128K ROM took a Toolbox trap's number from bits 0-8 of
-the word alone (Inside Macintosh IV, Using Assembly Language), a Toolbox
-word with bit 9 set that names nothing is the trap in bits 0-8: Crozzle
-0.8 calls `NewWindow` as `$AB13`.
+`cpu.run()` will run the next block of code on the emulated CPU. When it hits an A-line trap (among other things), this function will return.
 
-**Patches.** `SetTrapAddress` patches work, and so does calling a trap
-through the address `GetTrapAddress` gave. A patch on an OS trap is
-entered as the Mac's dispatcher enters it, with the registers it saved on
-the stack, since some patches unwind that frame themselves.
-`GetTrapAddress` calls `_OSDispatch` unimplemented, although it works:
-programs that look for MultiFinder that way, Microsoft's among them,
-then make MultiFinder's private calls. Programs that want the Process
-Manager or temporary memory ask Gestalt.
+The dispatcher (see `m68k/dispatch.py`) looks for the particular trap's instruction ID in `m68k/trapdefs.py`. This is code generated from the Multiversal interface files, providing information on the function's arguments (in stack, or in registers), how the result should be returned, and a 'selector' in case the same opcode will trigger one of a number of traps depending on arguments (e.g. `_Pack3` or `_OSDispatch`). Then an appropriate Python routine (designated by the decorator `@trap`) is executed, the result put back to the emulated CPU/memory in an appropriate manner, and execution resumed.
 
-**Calling back.** Filter procedures, `CDEF`s, user items, action
-procedures and patched traps are 68k code that the Toolbox calls.
-`Runner.call()` runs a nested CPU loop until the routine returns.
+All trap instructions begin with `A`. The lower 9 bits of the instruction are used to determine which trap is being called, with the 11th bit being 1 for Toolbox traps, and 0 for OS level traps (for more info, see [About the Trap Manager](https://preterhuman.net/macstuff/techpubs/mac/OSUtilities/OSUtilities-170.html) from Inside Macintosh).
 
-[Working on macrt](development.md#adding-a-toolbox-routine) shows what a
-trap routine looks like.
+There are some behaviours that have to be worked around, however. Earlier Mac ROMs only decode the lower 8 bits, so the 9th bit is ignored. For an example of where this resulted in a problem - Crozzle 0.8  calls `NewWindow` as `$AB13` rather than the correct `$A913`, resulting in a crash. Classetta takes a dynamic approach to this - if bit 9 is set, and the trap doesn't match anything known, the corresponding trap with bit 9 cleared will be used. This will not produce 100% compatibility but allows this issue to be resolved most times without having to implement separate behaviours.
+
+OS-level traps (`$A000`-`$A7FF`) have arguments provided in the CPU`s registers, primarily A0/D0. Often these include bitfield flags mixed with parameters in a single register. These will also update CPU flags based on D0 so that the branch instructions can then branch on the result.
+
+Toolbox traps (`$A800`-`$AFFF`) have arguments provided in the same manner as Pascal function calls, provided on the stack. There is allocated space for the result first, followed by arguments in order (last argument is at the uppermost address). The handler will pop all the arguments from the stack and write the result in.
+
+Bit 10 of the opcode is known as the 'auto-pop' bit, if set will pop 4 bytes from the stack before dispatching to the toolbox routine, so that if function A JSRs to a subroutine B which calls the toolbox trap, control will actually return directly to function A rather than B.
+
+If a trap is documented but Classetta does not yet implement it, it will be logged and skipped. Arguments will be popped from the stack (nothing will be done with them), and the trap will return `unimpErr` for dispatch traps or `0` otherwise. If it is undocumented, a crash with System Error 12 will be generated - continuing to execute code will not be possible because we don't know how many bytes to remove from the stack to pop (and ignore) the arguments.
+
+## Patching
+
+`SetTrapAddress` can be used to change the handler for a particular trap. `GetTrapAddress` can be used to obtain the address of the trap handler. Frequently this is used so that the new routine can call the old one as part of its work. So our trap handler must be able to handle a direct call to the function via its memory address, not just an A-line instruction.
+
+This handler is called in the same way the Mac's own dispatcher does, saving registers on the stack in the same format (since some patches use this data in the handler).
+
+`GetTrapAddress` will return unimplemented for `_OSDispatch` even though we do have it implemented. Some programs will use this trap as a method of determining if MultiFinder is running - if they see this trap is implemented, they'll then try to make private calls to MultiFinder itself that will subsequently fail, as we do not have MultiFinder actually running (Microsoft's apps frequently do this).
+
+Filter procedures, `CDEF`s, user items, action procedures and patched traps are implemented in 68k code that will be called by the toolbox. In order to handle these, `Runner.call()` will run the function, returning when the function returns.
+
+More information on trap routines can be found in [Working on macrt](development.md#adding-a-toolbox-routine).
 
 
 ## Memory
+<!--
+  TODO:
+  - is this address map correct?
+  - is that the correct criteria for 512x342 screen placement?
+-->
 
-`System` (in `toolbox/system.py`) owns 8 MB of emulated RAM:
+`System` (in `toolbox/system.py`) implements the following address space:
 
 ```
-$000000  low-memory globals: MemTop, ScrnBase, WindowList, MenuList, CurrentA5…
-$003000  system heap: the Window Manager port, GrayRgn, the System file's
-         resource map and the defproc stand-ins
-$100000  one partition per app, sized by its SIZE resource (else 1 MB)
-top      the screen buffer
+$FFFFFF  top of the screen buffer (extending downwards from here)
+$100000  one partition per app, sized by its SIZE resource (at least 1MB)
+$003000  system heap: Window Manager port, GrayRgn, System file resource map, defproc stand-ins
+$000000  low-memory globals: MemTop, ScrnBase, WindowList, MenuList, CurrentA5 and more
 ```
 
-A 512×342 screen is where a Mac 512K has it instead, at `$7A700` with the
-alternate buffer at `$72700` below it. The system heap ends below both,
-and the partitions take the rest of RAM above them. Games from 1984 write
-there without asking `ScrnBase` (see [The
-hardware](toolbox.md#the-hardware)).
+If the screen is 512x342, it will be placed at `$7A700` with an alternate buffer at `$72700`. Many early games will hard-code this address rather than query `ScrnBase` (see [The
+hardware](toolbox.md#the-hardware)). The partitions take the rest of RAM above this.
 
-Each partition is laid out like a classic Mac application space: heap at the
-bottom, stack below the A5 world, A5 world at the top. The QuickDraw globals
-(thePort, the patterns, the arrow cursor, screenBits) sit just below A5, and
-0(A5) points to thePort, which is where `InitGraf` leaves it.
+Each of the memory partitions is laid out like a classic Mac's application: heap at the bottom, A5 world at the top, with stack below it (extending downwards). The QuickDraw globals (thePort, patterns, arrow cursor, screenBits) exist at the bottom of A5.
 
-* **Memory Manager** (`memmgr.py`): pointers and handles with the 24-bit block
-  header (tag byte, physical size, relative handle or zone pointer) and master
-  pointers with their flag byte (locked, purgeable, resource). Code that looks
-  at a header finds what it expects there. A locked handle never moves.
-  When an allocation doesn't fit, the application
-  heap grows toward `ApplLimit`, all the way when even that isn't enough:
-  programs written before `MaxApplZone` ask for more than there is to get
-  the whole heap, and MacWrite counts what's free by walking the block
-  headers. A purged handle stays valid with a NIL master pointer, as
-  `EmptyHandle` leaves it. [What works](toolbox.md#memory-manager) has
-  the rest: compaction, purging, temporary memory and grow-zone
-  functions.
-* **Per-app globals** (`lowmem.py`): under MultiFinder some low-memory globals
-  belong to the running app (`WindowList`, `MenuList`, `CurrentA5`, `ApplZone`…).
-  Each app keeps its copy in a `World`, which is swapped in while that app has
-  the CPU. The Toolbox always goes through the `World`, so it gets the right
-  copy either way.
-* **Records** (`windows.py`, `menus.py`, `quickdraw.py`): `GrafPort` (108 bytes),
-  `WindowRecord` (156 bytes, chained through `nextWindow` from the app's
-  `WindowList` global), `MenuInfo` (a handle: ID, enable flags, then menuData
-  with the title and items), and the `MenuList` menu bar handle, all laid out
-  as in Inside Macintosh. The Python classes are views over the bytes. There is
-  one canonical view per port address, so a WindowPtr that comes back from guest
-  code is the same object the UI knows.
+The Memory Manager (`memmgr.py`) deals with pointers and handles using the 24-bit block header (tag byte, physical size, relative handle or zone pointer) and master pointers with their flag byte (locked, purgeable, resource). Code that manipulates these directly will see them as it expects (compatibilty with "32 bit dirty" apps is retained). The code will not move any handles marked as "locked" to preserve this guarantee.
+
+When an allocation is made for greater than the amount of available memory, the application heap grows towards `ApplLimit`. Programs written before `MaxApplZone` was added may ask for an excessively large number in order to signify they want to allocate all avaliable memory. Compatibility with this should be retained. Some applications like MacWrite count free memory by looking at block headers, so we need to retain compatible structures with the classic Mac OS.
+
+A purged handle keeps the master pointer as NIL, just like `EmptyHandle` would do on real Mac OS.
+
+See [What works](toolbox.md#memory-manager) for details on compaction, purging, temporary memory and grow-zone.
+
+Under MultiFinder some of the low-memory globals belong to the running app (`WindowList`, `MenuList`, `CurrentA5`, `ApplZone` etc). Each app has their own copy in an "A5 World" (see [The A5 World](https://preterhuman.net/macstuff/techpubs/mac/runtimehtml/RTArch-116.html)), implemented in `lowmem.py` as `World` which is swapped before execution of that app begins on the CPU.
+
+In `windows.py`, `menus.py` and`quickdraw.py`, the `WindowRecord`, `WindowList`, `MenuInfo` and `MenuList` structures are implemented as views over the bytes in memory, with the in-memory layout being identical to the documented layout in Inside Macintosh. These classes are backed by the actual Mac's memory, so the UI is drawn with reference to what the Mac actually has in memory.
 
 ### The stack
 
-An application gets 32K of stack between `ApplLimit` and
-`CurStackBase`, and `DefltStack` says so: The Fool's Errand takes what
-that falls short of 32K from its heap. A `SIZE` resource's sizes, and
-Get Info's, count 8K of it, the stack Inside Macintosh's "The Stack and
-the Heap" says an application starts with; the other 24K comes on top,
-so the heap is the one the sizes leave room for. GNU Chess Pro 1.0
-halves its two tables until both fit: in a heap 8K bigger they fit at
-160K each, and its board then can't get the memory it draws with.
+An application is allocated 32K of stack from `ApplLimit` to `curStackBase` (the variable `DefltStack` reflects this). Note that this is a little different from a real Mac, where it's 8kB without colour QuickDraw, and 24K with it.
 
-`ReserveMem` grows the heap toward `ApplLimit` for what it reserves,
-and all the way when that's not enough, as a 64K ROM's does for
-programs that ask for more than there is in place of `MaxApplZone`.
-`SetApplLimit` leaves the stack at least `DefltStack`, as the errata to
-Inside Macintosh: Memory says it does ("Addendum to Description of
-SetApplLimit"): a limit nearer `CurStackBase` than that, or past it,
-becomes `DefltStack` below `CurStackBase`, where launch puts it. Macify
-2.7 asks for 128K past `ApplZone` in its 75K partition, past the end of
-it, and Bumptz Science Carnival for a limit at its stack pointer; each
-then calls `MaxApplZone`, and a segment, or a handle moved high, would
-otherwise land on the stack in use.
+`ReserveMem` will grow the size of the heap toward `ApplLimit` as long as there's still space. If that's more than is available, it will simply allocate what's avaliable and return the size of the allocation.
 
+`SetApplLimit` will never shrink the stack below `DefltStack`. This is important to make certain apps like Macify 2.7 and Bumptz Science Carnival work, as they try to do this (but would immediately crash if it was actually done).
 
 ## Drawing and the display
 
-* **QuickDraw** (`qdraw.py`) draws into an image for each window (its
-  `Backing`, which the window shows), or, for any other port, into its
-  portBits: a bitmap or pixel map in guest memory, so offscreen drawing
-  and `CopyBits` work as on a Mac. Regions are real QuickDraw regions,
-  read from and written back to their data in guest memory. Text moves
-  the pen a whole number of pixels for each character, as on a Mac, so
-  text that a word processor measures a character at a time lands where
-  it draws it.
-* **The screen buffer** (`screen.py`) mirrors the windows. What QuickDraw
-  draws in a window is written to the buffer where the window is seen,
-  and what a program writes in the buffer itself is drawn in the window
-  it lands on, the next time macrt looks: at a trap, or from the CPU's
-  clock once a tick while the program calls none.
-* **The chrome is a puppet.** Qt never acts on a click by itself. Every click
-  becomes a `mouseDown` event in the owning app's queue. The app calls
-  `FindWindow` and then, say, `TrackGoAway`, and only then does the close box
-  draw pressed. If the app never calls `DragWindow`, the window doesn't move,
-  just as on a real Mac.
-* **Blocking calls are trackers.** `MenuSelect`, `TrackGoAway`, `TrackBox`,
-  `DragWindow` and `GrowWindow` start a tracker on the GUI thread and wait on a
-  `Future` that the tracker settles from mouse events. If the button is already
-  up by the time the app gets there, the tracker sees that, as `StillDown`
-  would.
-* **`ui/chrome.py` is the WDEF.** It is a set of pure functions for geometry,
-  `wHit` codes and painting, covering document windows (with or without
-  grow/zoom), `dBoxProc`, `plainDBox`, `altDBoxProc`, `movableDBoxProc` and
-  `rDocProc` with its corner variations. Everything is drawn with whole-pixel
-  `fillRect`. An application's own `WDEF` or `MDEF` is run as 68k code
-  instead (`m68k/wdefs.py`, `m68k/mdefs.py`).
+QuickDraw, implemented in `qdraw.py`, draws into an image for each window (`Backing`) or a `portBits` region in the Mac's memory (offscreen drawing and `CopyBits` will work). Regions are implemented as actual QuickDraw regions, manipulated in guest memory.
+
+Text width is correctly implemented, even with different fonts picked by the host.
+
+The screen buffer in `screen.py` will mirror the windows. QuickDraw draws into the window's buffer, and then the window in drawn next time a trap is hit, or if no traps occur, once per tick (1/60th of a second).
+
+Window functionality is not implemeted natively inside Qt. Every click is sent to the emulated Mac as a `mouseDown` event in the app's queue. For example: when closing a window, if the app was to call `TrackGoAway` (the function called when a close box is clicked), the close box then re-draws as pressed - because the emulated Mac called the function, not because there is a handler in Qt to draw this.
+
+Functions like `MenuSelect`, `TrackGoAway`, `TrackBox`, `DragWindow` and `GrowWindow` will start a tracker on the GUI thread, awaiting completion of a `Future` from mouse events.
+
+`ui/chrome.py` implements WDEF related logic. It has functions for geometry, `wHit` codes, painting, covering document windows, `dBoxProc`, `plainDBox`, `altDBoxProc`, `movableDBoxProc` and
+  `rDocProc``dBoxProc`, `plainDBox`, `altDBoxProc`, `movableDBoxProc` and `rDocProc`. Everything is drawn with `fillRect` quantized to whole pixels.
+
+If an application provides custom `WDEF` or `MDEF` resources, these are run as native 68k code instead (see `m68k/wdefs.py`, `m68k/mdefs.py`).
 
 ![](screenshots/window-kinds.png)
-
-### Where the windows go
-
-`DisplayConfig` (in `macrt/ui/display.py`) has two independent settings,
-which the command line's `--host` and `--menubar` set:
-
-| | `menu_bar="global"` | `menu_bar="window"` |
-|---|---|---|
-| **`host="desktop"`** | Mac windows are frameless host windows, with one menu bar across the top of the screen | Mac windows are host windows, each with its app's menu bar under the title bar, so they blend in with host apps |
-| **`host="screen"`** | One host window holds a Mac screen (desktop pattern, rounded corners) with a classic menu bar | The same screen, with the menu bars in the windows |
-
-**Global menu bar.** The bar shows the front app's menus. Clicking another
-app's window brings that app forward (MultiFinder style). It gets suspend and
-resume events, the bar switches to its menus, and the click itself is not passed
-on as a mouseDown. With two or more apps running, the System 7 Application menu
-appears at the right end (Hide *App*, Hide Others, Show All, then the app list).
-`application_menu="always"|"never"` overrides that. An app that adds items to its
-System 7 Help menu (`HMGetHelpMenuHandle`) has that menu to its left, under a
-balloon.
-
-**Per-window menu bar.** Every document window draws its app's bar under the
-title bar. When a dialog is in front, the menus stay reachable through the app's
-other windows. An app with no document windows open gets a small bar-only window
-titled with its name, so its menus never disappear.
-
-Other options: `screen_size`; `sticky_menus` (default on: a quick click on a
-title leaves the menu open, Mac OS 8 style; off means strictly
-press-drag-release); and `theme.RAINBOW_APPLE` for the System 7 color apple.
 
 
 ## Resources and files

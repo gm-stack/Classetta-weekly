@@ -285,6 +285,11 @@ def parse_args(argv=None):
                     help="with --model ii or iix, the screen's bits a pixel: 1 for black and "
                          "white, 2 to 8 for colours by a colour table, 16 and 32 for direct "
                          "colour (default: 8)")
+    ap.add_argument("--screens", type=int, metavar="N", default=1,
+                    help="how many screens the machine has, of the one size and depth, side "
+                         "by side (default: 1).  Only the first has the menu bar and the "
+                         "windows; a program that draws Panorama-style across three monitors "
+                         "draws in the others' buffers itself.")
     ap.add_argument("--row-bytes", type=int, metavar="N", default=None,
                     help="how many bytes apart the screen's rows are at the depth it starts "
                          "at (and at another, as many pixels apart), for a program that writes "
@@ -375,6 +380,12 @@ def parse_args(argv=None):
         ap.error("--memory is a size in K, more than 0")
     if args.depth not in (None, 1) and not MODELS[args.model].color:
         ap.error("a Mac Plus's screen is black and white: --depth needs a model with a colour screen")
+    if args.screens < 1:
+        ap.error("--screens is a number of screens, 1 or more")
+    if args.screens > 1 and (args.depth == 1 or not MODELS[args.model].color):
+        ap.error("more than one screen needs a model with a colour screen at a colour depth")
+    if args.screens > 1 and args.host != "screen":
+        ap.error("more than one screen needs --host screen: the screens are host windows")
     if args.row_bytes is not None and not row_bytes_ok(args.row_bytes):
         ap.error(f"--{ROW_BYTES}")
     if args.size is not None:
@@ -557,6 +568,7 @@ def main(argv=None) -> int:
                                         system_file=system_file, speed=args.speed,
                                         model=args.model, depth=args.depth,
                                         row_bytes=args.row_bytes, disks=disks,
+                                        screens=args.screens,
                                         sound=not args.no_sound, record_sound=args.record_sound,
                                         scripted=bool(args.script)))
     except (OSError, ValueError) as e:      # a screen too big, a WAV file that can't be made

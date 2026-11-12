@@ -109,6 +109,13 @@ def GetNextDevice(t, gdh):
     return gd.next_gd if gd is not None else 0
 
 
+def _reaches(t, r: Rect, gdh: int) -> bool:
+    """Whether the global rectangle r overlaps gdh's gdRect."""
+    screen = _gd(t, gdh).rect
+    return (r.top < screen.bottom and screen.top < r.bottom
+            and r.left < screen.right and screen.left < r.right)
+
+
 @trap
 def GetMaxDevice(t, p):
     """The deepest device the global rectangle reaches: the main screen,
@@ -116,10 +123,11 @@ def GetMaxDevice(t, p):
     devices = t.system.devices
     if devices is None:
         return 0
-    r, gd = t.mem.r_rect(p), _gd(t, devices.main)
-    screen = gd.rect
-    return devices.main if (r.top < screen.bottom and screen.top < r.bottom
-                            and r.left < screen.right and screen.left < r.right) else 0
+    r = t.mem.r_rect(p)
+    for gdh in devices.screens:        # the main screen first: its own wins
+        if _reaches(t, r, gdh):
+            return gdh
+    return 0
 
 
 @trap
@@ -132,25 +140,41 @@ def TestDeviceAttribute(t, gdh, attribute):
 def DeviceLoop(t, rgn, proc, user_data, flags):
     """Call proc(depth, deviceFlags, targetDevice, userData) for each
     screen device drawingRgn reaches, to draw what's there as suits the
-    device (Imaging With QuickDraw, Graphics Devices).  There's one
-    screen: proc is called once for it, unless the region is empty; on
-    a black-and-white Mac with no device, for a 1-bit one, NIL."""
-    proc &= t.mem.system.addr_mask
+    device (Imaging With QuickDraw, Graphics Devices).  proc is called
+    once for each screen the region reaches (or, with allDevices, for
+    every screen of the machine); on a black-and-white Mac with no
+    device, for a 1-bit one, NIL."""
+    proc &= t.mem.addr_mask
     if not proc:
         return
-    rgn &= t.mem.system.addr_mask
-    if rgn and not flags & 4:                   # not allDevices
+    rgn &= t.mem.addr_mask
+    all_devices = bool(flags & 4)
+    if t.system.devices is None:
+        # A black-and-white Mac: one 1-bit device, NIL.  NULL or an empty
+        # region isn't called for unless allDevices is set.
+        if rgn and not all_devices:
+            p = deref(t.mem, rgn)
+            if p and t.mem.r_rect(p + 2).empty:
+                return
+        reached = [0]
+    elif all_devices:
+        reached = t.system.devices.screens
+    elif rgn:
         p = deref(t.mem, rgn)
         if p and t.mem.r_rect(p + 2).empty:
             return
-    devices = t.system.devices
-    if devices is None:
-        depth, gd_flags, gdh = 1, 0, 0
+        reached = [gdh for gdh in t.system.devices.screens
+                   if _reaches(t, t.mem.r_rect(p + 2), gdh)]
     else:
-        gdh = devices.main
-        gd_flags = _gd(t, gdh).flags
-        depth = _pixmap(t, gdh).pixel_size
-    t.call(proc, (("h", depth), ("h", gd_flags), ("l", gdh), ("l", user_data)))
+        reached = [t.system.devices.main]       # NULL region: the main screen's
+    for gdh in reached:
+        if gdh == 0:                       # a black-and-white Mac: a 1-bit device
+            depth, gd_flags = 1, 0
+        else:
+            gd = _gd(t, gdh)
+            gd_flags = gd.flags
+            depth = _pixmap(t, gdh).pixel_size
+        t.call(proc, (("h", depth), ("h", gd_flags), ("l", gdh), ("l", user_data)))
 
 
 @trap

@@ -352,7 +352,8 @@ class System:
                  menu_bar_height: int = 20, system_file: MacFile | None = None,
                  disk_system: MacFile | None = None, disk_fonts: Sequence[MacFile] = (),
                  speed: float | None = None, model: str = "plus", sound: Sequence = (),
-                 depth: int | None = None, row_bytes: int | None = None):
+                 depth: int | None = None, row_bytes: int | None = None,
+                 screens: int = 1):
         """system_file: a real System file to use in place of macrt's own.
         disk_system: the System file on the disk the applications come
         from, whose fonts macrt's own adds (see _disk_fonts), and
@@ -367,7 +368,11 @@ class System:
         another in proportion to its bits a pixel, as if the screen's
         memory were that many pixels wider than shows (as few as a row
         needs, if not given), for a program that takes them to be so many
-        rather than asking."""
+        rather than asking.  screens: how many screens the machine has,
+        all the size and depth given (Color QuickDraw models only): the
+        main one's device is first in the list, the others' gdRects sit
+        to its right in the same global coordinates, and each has its
+        card's buffer of its own, below the main screen's in RAM."""
         w, h = screen_size
         self.speed = speed
         self.sound = list(sound)
@@ -414,16 +419,25 @@ class System:
             mem.mirror(PLUS_SCREENS, PLUS_SCREENS_END, CLASSIC_ALTERNATE & ~0xFFF)
             self._reserved.append((PLUS_SCREENS, PLUS_SCREENS_END))
         else:
+            if screens < 1:
+                raise ValueError(f"{screens} screens isn't a machine")
+            if screens > 1 and (depth == 1 or not self.model.color):
+                raise ValueError(f"a {self.model.name} has no second screen")
             base = (self.ram_size - row_bytes * h) & ~3
-            if base < SYS_HEAP_END + DEFAULT_PARTITION:
-                raise ValueError(f"a {w}x{h} screen leaves no room for applications")
+            # Each extra screen's card has its buffer of its own, below
+            # the main screen's (and its card's), all screen_room bytes
+            # apart, as deep a card's memory as the main one's.
+            screen_room = self.screen_room = row_bytes * h
+            if base - screen_room * (screens - 1) < SYS_HEAP_END + DEFAULT_PARTITION:
+                raise ValueError(f"{screens} {w}x{h} screens leave no room for applications")
             sys_heap_end = SYS_HEAP_END
             if file_version(system_file) >= 0x0700 and base >= SYS7_HEAP_END + DEFAULT_PARTITION:
                 sys_heap_end = SYS7_HEAP_END
             self.partitions_start = sys_heap_end
-            self.partitions_end = base
+            self.partitions_end = base - screen_room * (screens - 1)
         self.screen_bits = BitMap(base, row_bytes, Rect(0, 0, h, w))
         self.screen_room = row_bytes * h               # what a deeper screen has to fit in
+        self.screens = screens if self.model.color else 1
         # The alternate screen buffer, which the VIA can show instead.
         self.alternate_screen = CLASSIC_ALTERNATE if classic else None
         # What the heaps' blocks' sizes are multiples of, as the model's
@@ -475,11 +489,13 @@ class System:
         mem.w32(lowmem.SysZone, SYS_HEAP_START)
         mem.w16(lowmem.MBarHeight, menu_bar_height)
         mem.w16(lowmem.ApFontID, 3)                     # the application font is Geneva
-        # Color QuickDraw's graphics device, the screen's.
-        self.devices = (Devices(mem, self.sys_heap, Rect(0, 0, h, w), base, row_bytes, depth)
+        # Color QuickDraw's graphics devices, the screens'.
+        self.devices = (Devices(mem, self.sys_heap, Rect(0, 0, h, w), base, row_bytes, depth,
+                                room=self.screen_room, screens=self.screens)
                         if self.model.color else None)
         self.open_wmgr_port()
-        mem.w32(lowmem.GrayRgn, new_rgn(self.sys_heap, Rect(desk_top, 0, h, w)))
+        mem.w32(lowmem.GrayRgn, new_rgn(self.sys_heap,
+                                        Rect(desk_top, 0, h, w * self.screens)))
         self.files = FileSystem(self)
         self.fcbs = self.files.fcbs                     # open files, by reference number
         self._open_system_file(system_file, disk_system, disk_fonts)
