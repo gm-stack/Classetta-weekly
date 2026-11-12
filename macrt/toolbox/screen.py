@@ -78,7 +78,8 @@ class Screen:
         self.size = self.row_bytes * self.bounds.height
         self.depth = system.depth
         self.devices = system.devices
-        table = self.devices.table() if self.devices is not None else None
+        table = self.devices.device_table(self.devices.main) \
+            if self.devices is not None else None
         self.bits = MemorySurface(self.mem, self.base, self.row_bytes, self.bounds,
                                   self.depth, table)
         self.bits.match = self.devices.matching() if self.devices is not None else None
@@ -121,6 +122,7 @@ class Screen:
         # each keeps its own seen, and its own place in the host's
         # coordinates (Display.screens, the host windows for the rest).
         self.extra = []
+        self.extra_gd = []              # each extra buffer's GDevice handle
         if system.devices is not None and len(system.devices.screens) > 1:
             for gdh in system.devices.screens[1:]:
                 pm = system.devices.pixmap(gdh)
@@ -129,7 +131,8 @@ class Screen:
                 rect = pm.bounds
                 self.extra.append(MemorySurface(self.mem, pm.base_addr & self.mem.addr_mask,
                                                 pm.row_bytes & 0x3FFF, rect,
-                                                self.depth, self.devices.table()))
+                                                self.depth, self.devices.device_table(gdh)))
+                self.extra_gd.append(gdh)
         self.extra_seen = [bytearray(self.mem.read(s.base, s.bounds.height * s.row_bytes))
                            for s in self.extra]
         # The screens' buffers, where programs and the debugger can see
@@ -174,15 +177,19 @@ class Screen:
             self.bits.match = self.devices.matching()
             self.shown = self.bits
             self.over_bar = Region()
-            # The extra screens follow the main one's depth.
+            # The extra screens follow the main one's depth, with each
+            # card's own table (set_depth's writes the same colours to
+            # each; a program can give them their own after that).
             self.extra = []
+            self.extra_gd = []
             for gdh in self.devices.screens[1:]:
                 pm = self.devices.pixmap(gdh)
                 if pm is not None:
                     self.extra.append(
                         MemorySurface(self.mem, pm.base_addr & self.mem.addr_mask,
                                       pm.row_bytes & 0x3FFF, pm.bounds,
-                                      self.depth, self.devices.table()))
+                                      self.depth, self.devices.device_table(gdh)))
+                    self.extra_gd.append(gdh)
             self.extra_seen = [bytearray(self.mem.read(s.base, s.bounds.height * s.row_bytes))
                                for s in self.extra]
             self.extra_drawn = [False] * len(self.extra)
@@ -313,25 +320,33 @@ class Screen:
                         self.on_layout()
 
     def _recolor(self) -> None:
-        """If the colour table has changed since the last look, show the
-        windows and the desk again from the buffer, in the new colours."""
+        """If any screen's colour table has changed since the last look,
+        show its buffer again in the new colours: the windows and the
+        desk on the main screen, and each other screen's host window.  A
+        program can program each screen's card separately (F/A-18's
+        Panorama mode gives each screen its own pmTable), so each is
+        looked at in its own table."""
         if self.devices is None:
             return
-        table = self.devices.table()
-        if table is self.bits.table:
-            return
-        self.bits.table, self.bits.match = table, self.devices.matching()
-        # The other screens show the same table.
-        for s in self.extra:
-            s.table, s.match = table, self.devices.matching()
-        self._pull()
-        for w, mine in self._owners:
-            self._show(w, mine)
-        if self.on_desk is not None:
-            self.on_desk(self.bounds)
-        # The extras' bytes haven't changed, so _pull_extras sees nothing:
-        # their hosts are told to show the buffer afresh, in new colours.
-        for i, s in enumerate(self.extra):
+        table = self.devices.device_table(self.devices.main)
+        if table is not self.bits.table:
+            self.bits.table, self.bits.match = table, self.devices.matching()
+            self._pull()
+            for w, mine in self._owners:
+                self._show(w, mine)
+            if self.on_desk is not None:
+                self.on_desk(self.bounds)
+        # The other screens: each in its own table.  Their bytes haven't
+        # changed, so _pull_extras sees nothing; each screen whose table
+        # changed has its host told to show its buffer afresh.
+        for i, (gdh, s) in enumerate(zip(self.extra_gd, self.extra)):
+            t = self.devices.device_table(gdh)
+            if t is s.table:
+                continue
+            # Its entry the reserved and held indexes stand for is
+            # itself: those are the main screen's (the Palette Manager's
+            # indexes), and what these buffers hold of them is as it is.
+            s.table, s.match = t, t
             if i < len(self.on_extra_desk) and self.on_extra_desk[i] is not None:
                 self.on_extra_desk[i](Rect(0, 0, s.bounds.height, s.bounds.width))
 

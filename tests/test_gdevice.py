@@ -739,6 +739,29 @@ def test_the_desk_is_the_whole_desktop_and_painted_on_every_screen(qapp):
         assert s.mem.r8(s.base) == first
 
 
+def test_each_screen_shows_its_own_colour_table(qapp):
+    """A program can program each screen's card separately (F/A-18's
+    Panorama mode gives each screen its own pmTable): a change to one
+    screen's colours changes that screen's table and no other's."""
+    g = screens3()
+    system = g.system
+    main, second = system.devices.screens[0], system.devices.screens[1]
+    second_pm = system.devices.pixmap(second)
+    entry = 5
+    before = system.screen.bits.table[entry]
+    assert system.screen.extra[0].table[entry] == before     # the same table, to start
+    with system.lock:
+        g("SetGDevice", second)
+        g("SetEntries", entry, 0, specs(g, (0, 0xFFFF, 0, 0)))     # red, on screen 2 only
+        system.screen.look()
+    assert system.screen.bits.table[entry] == before          # the main screen's, unchanged
+    assert system.screen.extra[0].table[entry] == 0xFFFF0000  # the second's, now red
+    assert system.screen.extra[1].table[entry] == before      # the third's, unchanged
+    # Each screen's card still holds its own table, by its own seed.
+    assert system.devices.device_table(second)[entry] == 0xFFFF0000
+    assert system.devices.device_table(main)[entry] == before
+
+
 def test_a_program_writing_in_an_extra_buffer_shows_there(harness):
     h = harness(model="ii", depth=8, screens=3)
     system = h.d.system

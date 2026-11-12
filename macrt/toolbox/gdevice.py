@@ -316,9 +316,10 @@ class Devices:
         self.heap = heap
         self.depth = depth
         self._seed = MIN_SEED
-        # The main device's colour state: by its table's seed, its colours
-        # as the table has them, and what the caches of them hold.
-        self._table: tuple[int, list[int]] = (-1, [])
+        # The screens' colour state, by device: each table's seed, its
+        # colours as the table has them, and (the main device's) what the
+        # caches of them hold.
+        self._tables: dict[int, tuple[int, list[int]]] = {}
         self._raw: list[int] = []
         self._index: dict[int, int] | None = None
         self._nearest: dict[int, int] = {}
@@ -491,23 +492,37 @@ class Devices:
         p = deref(self.mem, GDevice(self.mem, deref(self.mem, gdh)).pmap) if gdh else 0
         return PixMap(self.mem, p) if p else None
 
-    def table(self) -> list[int]:
-        """The main screen's colours, by pixel value, as its colour table
-        has them now (each unlike any other: see apart)."""
+    def device_table(self, gdh: int) -> list[int]:
+        """A screen's colours, by pixel value, as its own colour table has
+        them now: each unlike any other (see apart), where it's the main
+        screen's.  Each screen has its own table, its own seed, and its own
+        cache of it: a card's CLUT is programmed on its own card's driver
+        (the Panorama game writes each screen's pmTable itself), so a
+        change to one screen's colours changes that screen's table and no
+        other's."""
+        gdh &= self.mem.addr_mask
         mem = self.mem                  # read as pixmap() would, without the views
-        gd = deref(mem, self.main)
+        gd = deref(mem, gdh)
         pm = deref(mem, mem.r32(gd + _PMAP)) if gd else 0
         h = mem.r32(pm + _PM_TABLE) if pm else 0
         p = deref(mem, h)
         seed = mem.r32(p) if p else 0
-        if seed != self._table[0]:
-            table = read_table(self.mem, h) if self.depth <= 8 else []
-            self._raw = table
-            self._table = (seed, apart(table, self.reserved.keys() | self.held))
-            self._index = None
-            self._nearest = {}
-            self._matching = None
-        return self._table[1]
+        cache = self._tables.get(gdh, (None, None))
+        if seed != cache[0] or cache[1] is None:
+            table = read_table(self.mem, h)
+            if gdh == self.main & mem.addr_mask:
+                table = apart(table, self.reserved.keys() | self.held)
+                self._raw = table
+                self._index = None
+                self._nearest = {}
+                self._matching = None
+            self._tables[gdh] = (seed, table)
+        return self._tables[gdh][1]
+
+    def table(self) -> list[int]:
+        """The main screen's colours, by pixel value, as its colour table
+        has them now (each unlike any other: see apart)."""
+        return self.device_table(self.main)
 
     def alike(self, value: int, color: int) -> bool:
         """Whether the main screen's entry value has the same colour, in
@@ -523,7 +538,7 @@ class Devices:
         """The main screen's colours have changed, whether or not its
         table's seed has (RestoreEntries keeps it), or which of them are
         reserved has."""
-        self._table = (-1, [])
+        self._tables[self.main & self.mem.addr_mask] = (-1, [])
 
     def matching(self) -> list[int]:
         """The main screen's colours as a colour to draw in is matched to

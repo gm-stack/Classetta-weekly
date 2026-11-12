@@ -55,3 +55,43 @@ port.  `tests/test_trap_trace.py` runs `--trace-traps`' argument readers over
 every trap in the tables, since nothing else in the suite traces and a trap
 line is the first thing a broken one of them takes down: the game died at its
 first `ReserveMem`.
+
+## Ghidra's debugger, over Trace RMI
+
+`--trace-rmi` does the same thing as `--mcp`, but the front end is Ghidra's
+own debugger: the listing it has already analysed and named is the one it
+debugs, and a breakpoint placed on a routine in that listing lands on the live,
+relocated copy of the code.
+
+```sh
+python -m macrt App.bin --trace-rmi                 # dials 127.0.0.1:10000
+python -m macrt App.bin --trace-rmi 127.0.0.1:4000
+pip install /path/to/ghidra/Debug/Debugger-rmi-trace/pypkg   # what --trace-rmi needs
+```
+
+The direction is the reverse of `--mcp`.  Ghidra runs a small server (a plain
+socket speaking length-prefixed protobuf) and Classetta dials out to it, so the
+emulator is the client and the debugger is the listener — the same shape as
+Ghidra's own lldb agent.  Start the server from Ghidra's **Trace RMI** menu
+first, then launch Classetta with `--trace-rmi` pointed at it.
+
+The back end is `macrt/tracerpc.py`, a third thread exactly like the MCP
+server: it only asks — `macrt.dbg` for the core, the running application's
+`AppMap` for where its code is — and never touches a register or a byte while
+the core is inside the CPU.  There is no push from the core (a stop is a stop,
+and between stops the machine is moving), so a poll thread watches for the core
+coming to rest and, on each new stop, records one transaction: a snapshot, the
+registers in Ghidra's names, the program counter, and the code page around it.
+Everything is written in the `ram:` space — the jank image Ghidra analysed — so
+every byte, every program counter, every breakpoint is translated through the
+running application's `AppMap` on the way in and out.
+
+The debugger calls back the way it calls any back end — run control,
+breakpoints, memory, registers, and `execute`, which takes a line of the
+window's own command grammar (`b $1000`, `dm`, `sm`, `status`) and runs it.
+
+`tests/test_tracerpc.py` drives the real agent against a fake Trace RMI server
+on a real socket (no JVM, no Ghidra): the handshake and the object tree, a stop
+recorded with its registers and code page in the jank space, and a breakpoint
+that lands on the relocated byte — plus the jank↔live translation and the
+register build on their own.

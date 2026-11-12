@@ -381,6 +381,14 @@ def parse_args(argv=None):
                          "powers: status, pause, step, continue, breakpoints, "
                          "memory, screenshots and keys.  PORT defaults to 8765.  "
                          "Point the client at http://127.0.0.1:<port>/mcp")
+    ap.add_argument("--trace-rmi", nargs="?", const="", default=None,
+                    metavar="HOST:PORT",
+                    help="connect to a Ghidra Trace RMI server so Ghidra's "
+                         "debugger can drive this machine: it dials out to "
+                         "HOST:PORT (default 127.0.0.1:10000) and pushes the "
+                         "68k state as Ghidra steps, pauses and hits "
+                         "breakpoints.  Start the server from Ghidra's "
+                         "Trace RMI menu first.")
     args = ap.parse_args(argv)
     if args.memory is not None and args.memory <= 0:
         ap.error("--memory is a size in K, more than 0")
@@ -461,6 +469,25 @@ def _mcp_port(text: str) -> int | None:
     except ValueError:
         return None
     return port if 0 < port < 65536 else None
+
+
+def _trace_rmi_target(text: str) -> tuple[str, int] | None:
+    """HOST:PORT from --trace-rmi, or the default.  None for anything that
+    isn't a host and a port, so main can say so the way it says everything
+    else."""
+    from .tracerpc import DEFAULT_HOST, DEFAULT_PORT
+    if not text:
+        return DEFAULT_HOST, DEFAULT_PORT
+    host, sep, port = text.rpartition(":")
+    if not sep or not host:
+        return None
+    try:
+        port = int(port, 10)
+    except ValueError:
+        return None
+    if not 0 < port < 65536:
+        return None
+    return host, port
 
 
 def _run_script(display, path: str, quit_when_done: bool = False) -> None:
@@ -680,6 +707,15 @@ def main(argv=None) -> int:
                     port=port).url
         if not url:
             return 2            # the port was taken; serve() said which
+    if args.trace_rmi is not None:
+        # Ghidra's debugger as the front end: we dial out to its Trace RMI
+        # server and push the 68k state as the machine stops, so the listing
+        # Ghidra has already analysed is the one it's debugging.  connect()
+        # starts its own poll thread and returns, so this is non-blocking.
+        host, port = _trace_rmi_target(args.trace_rmi)
+        from .tracerpc import serve as trace_serve
+        if not trace_serve(display, host, port):
+            return 2            # said which: bad target or the dial failed
     signal.signal(signal.SIGINT, lambda *_: display.shutdown())
     heartbeat = QTimer(interval=200)      # lets Python see Ctrl+C
     heartbeat.timeout.connect(lambda: None)

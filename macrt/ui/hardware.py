@@ -100,7 +100,7 @@ def screen_info(display) -> list[ScreenInfo] | None:
                 break
             pm = PixMap(mem, pm)
             rect = gd.rect
-            base = pm.base_addr & mem.mask
+            base = pm.base_addr & mem.addr_mask
             out.append(ScreenInfo(
                 index=i,
                 name="main screen" if i == 0 else f"screen {i}",
@@ -111,7 +111,7 @@ def screen_info(display) -> list[ScreenInfo] | None:
                 top=rect.top,
                 left=rect.left,
                 base=base,
-                base_str=f"${base:0{8 if mem.address32 else 6}X}",
+                base_str=mem.addr_str(base),
                 row_bytes=pm.row_bytes & ROW_BYTES_MASK,
                 clut=_clut(mem, pm)))
             gdh = gd.next_gd
