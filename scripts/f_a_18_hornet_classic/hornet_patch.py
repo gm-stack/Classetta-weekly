@@ -1,44 +1,37 @@
 #!/usr/bin/env python3
 """
-USB HID controller viewer for F/A-18 Hornet.
+USB HID controller viewer for F/A-18 Hornet Classic.
 
-Adds a host Qt window (on macrt's existing Qt instance) that reads a USB
-HID joystick and shows its four tracked axes:
+Adds a host Qt window for control settings, reads USB HID input devices,
+and passes elevator, aileron, throttle and rudder into Hornet Classic
+by hooking process_game_input to poke the values into memory.
 
-    elevator / aileron   a 2D stick -- a point inside a square
-    rudder               a box with an indicator that moves left/right
-    throttle             a vertical bar that fills up from the bottom
-
-The window has a dropdown for the device and a dropdown for each tracked
-axis, so any HID joystick can be wired up.  It is not yet fed into the
-game -- this is the standalone viewer.
-
-Run with hornet.sh (it passes --script hornet_patch.py).
+Run by adding --script hornet_patch.py to Classetta's launch arguments.
 """
 
+import json
+import os
 import queue
 import threading
 
-# NOTE: `import hid` runs hidapi's top-level hid_init(), which schedules the
-# IOKit device manager on the run loop of the thread that imports it.  That
-# must be the worker thread (the one that calls enumerate/open/read), not the
-# script thread -- importing here would bind the manager to the wrong run
-# loop and the device-added callback would trip a pointer-authentication
-# check.  So the import is deferred into HidWorker._run (see _ensure_hid).
+# Note: 'import hid' is done under hid_init() because on Mac OS X, it talks
+# to IOKit's device manager and this for some reason *must* be done on the
+# main thread of the app, or else it fails pointer authentication checks
+# and crashes the whole process. So it's in a function and is passed to be
+# run there.
+
 from PyQt6.QtCore import Qt, QObject, QPointF, pyqtSignal
 from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QPolygonF
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QGridLayout, QLabel, QComboBox,
                              QGroupBox, QPushButton)
 
-# --------------------------------------------------------------------------
-# HID report-descriptor parsing
-# --------------------------------------------------------------------------
 
+# HID parsing
 
 def _usage_name(page, usage):
-    """A human name for a HID usage (generic desktop + simulation)."""
-    if page == 1:  # generic desktop
+    """Return useful names for things"""
+    if page == 1:
         names = {0x30: "X", 0x31: "Y", 0x32: "Z", 0x33: "Rx", 0x34: "Ry",
                  0x35: "Rz", 0x36: "Slider", 0x37: "Dial", 0x38: "Wheel",
                  0x39: "Hat"}
@@ -46,14 +39,16 @@ def _usage_name(page, usage):
             return names[usage]
         if 0x3A <= usage <= 0x3F:
             return f"Button {usage - 0x39}"
-        return f"Desktop 0x{usage:02x}"
-    if page == 2:  # simulation controls
+        return f"Unknown Control 0x{usage:02x}"
+    if page == 2:
         names = {0x01: "Flight Stick", 0x02: "Throttle", 0x20: "Throttle",
                  0x21: "Brake", 0x30: "Rudder", 0x31: "Throttle",
                  0x40: "Flight Stick"}
         if usage in names:
             return names[usage]
         return f"Sim 0x{usage:02x}"
+    if page == 9:
+        return f"Button {usage}"
     return f"Page {page} 0x{usage:02x}"
 
 
@@ -229,6 +224,26 @@ def game_axes(axes):
             if a["page"] in (1, 2) and a["bit_len"] > 1]
 
 
+def game_buttons(axes):
+    """The buttons of a device: variable one-bit inputs on the button
+    usage page (page 9); the usage value is the button number."""
+    return [a for a in axes
+            if a["page"] == 9 and a["bit_len"] == 1]
+
+
+def device_identity(info):
+    """A stable, JSON-safe string that identifies a device across
+    rescans.  Pool indices shift between rescans, so bindings and axis
+    maps are keyed on the device itself: its path when we have one, its
+    vendor/product IDs otherwise."""
+    path = info.get("path")
+    if path:
+        if isinstance(path, bytes):
+            path = path.hex()
+        return f"path:{path}"
+    return f"vp:{info['vendor_id']:04x}:{info['product_id']:04x}"
+
+
 # --------------------------------------------------------------------------
 # Display widgets (1-bit: white ground, black lines and indicators)
 # --------------------------------------------------------------------------
@@ -341,6 +356,7 @@ class _HidSignals(QObject):
 
     pool_ready = pyqtSignal(object)      # the filtered device pool
     values = pyqtSignal(object)          # {pool index: {axis index: raw}}
+    button_pressed = pyqtSignal(int, int)  # (pool index, button index)
     status = pyqtSignal(str)
 
 
@@ -367,6 +383,8 @@ class HidWorker:
         self._devices = {}               # pool index -> open hid.device
         self._pool = []
         self._last_raw = {}              # (pool index, axis index) -> value
+        self._last_btn = {}              # (pool index, button index) -> 0/1
+        self._used = set()               # pool indices we should keep open
         self._thread = threading.Thread(
             target=self._run, name="hid-worker", daemon=True)
 
@@ -385,7 +403,9 @@ class HidWorker:
         self._cmd.put(("open", di))
 
     def set_used(self, used):
-        """Close every open device not in `used` (a set of pool indices)."""
+        """The pool indices the window currently cares about (controls
+        plus any device with an axis bound to an action).  The worker
+        opens each of them if it hasn't already, and closes the rest."""
         self._cmd.put(("set_used", set(used)))
 
     # -- the worker thread ------------------------------------------------
@@ -470,9 +490,13 @@ class HidWorker:
             # the report it belongs to (a device that uses report IDs
             # prefixes every report with the report-ID byte)
             gaxes = []
+            gbtns = []
             for rid, rep in reports.items():
                 for a in game_axes(rep["axes"]):
                     gaxes.append({**a, "report_id": rid,
+                                  "has_id": rep["has_id"]})
+                for a in game_buttons(rep["axes"]):
+                    gbtns.append({**a, "report_id": rid,
                                   "has_id": rep["has_id"]})
             if not gaxes:
                 continue
@@ -480,7 +504,9 @@ class HidWorker:
                     f"{info.get('product_string', '')}").strip()
             if not name:
                 name = f"0x{info['vendor_id']:04x}:0x{info['product_id']:04x}"
-            pool.append({"name": name, "info": info, "axes": gaxes,
+            pool.append({"name": name, "info": info,
+                         "identity": device_identity(info),
+                         "axes": gaxes, "buttons": gbtns,
                          "reports": reports,
                          "uses_ids": any(r["has_id"] for r in reports.values())})
         self._pool = pool
@@ -509,8 +535,13 @@ class HidWorker:
         self._devices[di] = dev
 
     def _set_used(self, used):
-        """Close every open device whose pool index isn't in `used`."""
-        for di in [d for d in self._devices if d not in used]:
+        """Open every used device we haven't opened yet; close every
+        open device whose pool index isn't in `used`."""
+        self._used = set(used)
+        for di in sorted(self._used):
+            if di not in self._devices:
+                self._open(di)
+        for di in [d for d in self._devices if d not in self._used]:
             dev = self._devices.pop(di)
             try:
                 dev.close()
@@ -526,11 +557,13 @@ class HidWorker:
         self._devices = {}
 
     def _poll(self):
-        """Read every open device; emit the axes whose values changed."""
+        """Read every open device; emit the axes whose values changed,
+        and a rising-edge signal for every button that went from
+        released to pressed (which is what makes bind mode ignore
+        buttons that were already held when it started)."""
         changed = {}
         for di, dev in list(self._devices.items()):
             pool = self._pool[di]
-            axes = pool["axes"]
             while True:
                 try:
                     report = dev.read(64)
@@ -543,13 +576,23 @@ class HidWorker:
                 # the report-ID byte; find which report this is
                 rid = data[0] if pool["uses_ids"] else 0
                 payload = data[1:] if pool["uses_ids"] else data
-                for ai, axis in enumerate(axes):
+                for ai, axis in enumerate(pool["axes"]):
                     if axis["report_id"] != rid:
                         continue
                     v = extract(payload, axis)
                     if self._last_raw.get((di, ai)) != v:
                         self._last_raw[(di, ai)] = v
                         changed.setdefault(di, {})[ai] = v
+                for bi, btn in enumerate(pool["buttons"]):
+                    if btn["report_id"] != rid:
+                        continue
+                    v = 1 if extract(payload, btn) else 0
+                    if v == 1 and self._last_btn.get((di, bi)) != 1:
+                        # rising edge only
+                        self._last_btn[(di, bi)] = v
+                        self._sig.button_pressed.emit(di, bi)
+                    elif v != self._last_btn.get((di, bi)):
+                        self._last_btn[(di, bi)] = v
         if changed:
             self._sig.values.emit(changed)
 
@@ -574,13 +617,22 @@ class HidControllerWindow(QMainWindow):
 
     TRACKED = ("aileron", "elevator", "rudder", "throttle")
 
+    # the dummy button actions (the real game actions come later)
+    ACTIONS = ("Action 1", "Action 2", "Action 3")
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("USB HID Controller")
-        self._pool = []            # [{"name","info","axes"}] filtered devices
+        self._pool = []            # [{"name","identity","info","axes","buttons"}]
         self._dev_idx = {}         # tracked name -> pool index (-1 = none)
         self._axis_idx = {}        # tracked name -> index into device axes
         self._last = {}            # tracked name -> last raw value
+        # button bindings: action -> {device_id, button_id, device_name,
+        # button_name} or None; devices are addressed by stable
+        # identity, never by (shifting) pool index.
+        self._bindings = {a: None for a in self.ACTIONS}
+        self._bind_action = None   # the action in bind mode, or None
+        self._load_settings()
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -635,10 +687,34 @@ class HidControllerWindow(QMainWindow):
             Qt.TextInteractionFlag.TextSelectableByMouse)
         outer.addWidget(self.values)
 
+        # -- button actions ---------------------------------------------
+        # one dropdown of actions; selecting one shows its binding
+        # (device + button) with Set/Clear and Clear beside it.
+        outer.addWidget(QLabel("Button actions"))
+        row = QHBoxLayout()
+        self._action_box = QComboBox()
+        self._action_box.setMinimumWidth(200)
+        self._action_box.addItems(self.ACTIONS)
+        self._action_box.currentIndexChanged.connect(self._on_action_sel)
+        row.addWidget(self._action_box)
+        self._bind_label = QLabel("")
+        self._bind_label.setMinimumWidth(220)
+        row.addWidget(self._bind_label)
+        self._set_btn = QPushButton("Set")
+        self._set_btn.clicked.connect(lambda checked=False: self._on_set())
+        row.addWidget(self._set_btn)
+        self._clear_btn = QPushButton("Clear")
+        self._clear_btn.clicked.connect(lambda checked=False: self._on_clear())
+        row.addWidget(self._clear_btn)
+        row.addStretch(1)
+        outer.addLayout(row)
+        self._update_bind_label()
+
         # -- the worker ---------------------------------------------------
         self._sig = _HidSignals(self)
         self._sig.pool_ready.connect(self._on_pool_ready)
         self._sig.values.connect(self._on_values)
+        self._sig.button_pressed.connect(self._on_button_pressed)
         self._sig.status.connect(self._on_status)
         self._worker = HidWorker(self._sig)
         self._worker.start()
@@ -647,12 +723,11 @@ class HidControllerWindow(QMainWindow):
     def _on_pool_ready(self, pool):
         self._pool = pool
         self._refresh_device_boxes()
+        self._apply_pending_axis()
         self._remap()
-        # (re)open every device a tracked axis points at
-        for name in self.TRACKED:
-            di = self._dev_idx.get(name, -1)
-            if 0 <= di < len(self._pool):
-                self._worker.open_device(di)
+        # open every device we poll (controls + axis-bound devices;
+        # the worker closes whatever else is open)
+        self._worker.set_used(self._used_devices())
 
     def _on_values(self, changed):
         """changed: {pool index: {axis index: raw value}} for the axes
@@ -707,6 +782,21 @@ class HidControllerWindow(QMainWindow):
             box.setCurrentIndex(cur if 0 <= cur < box.count() else 0)
             self._axis_idx[name] = box.currentIndex()
         box.blockSignals(False)
+
+    def _apply_pending_axis(self):
+        """Match each axis saved in controls.json against the fresh
+        pool by device identity and axis name, and adopt it.  Run
+        before _remap so the defaults never clobber a loaded mapping."""
+        for name, m in getattr(self, "_pending_axis", {}).items():
+            if 0 <= self._dev_idx.get(name, -1) < len(self._pool):
+                continue        # already mapped this session; leave it
+            for di, p in enumerate(self._pool):
+                if p["identity"] != m["device_id"]:
+                    continue
+                names = [a["name"] for a in p["axes"]]
+                if m["axis_name"] in names:
+                    self._set_mapping(name, di, names.index(m["axis_name"]))
+                break
 
     def _remap(self):
         """Apply sensible defaults to any tracked axis that has no mapping
@@ -777,19 +867,146 @@ class HidControllerWindow(QMainWindow):
         di = getattr(self, f"_{name}_dev").itemData(idx)
         self._dev_idx[name] = di if di is not None else -1
         self._populate_axis_box(name)
-        if 0 <= self._dev_idx[name] < len(self._pool):
-            self._worker.open_device(self._dev_idx[name])
-        self._close_unused()
+        self._worker.set_used(self._used_devices())
 
     def _on_axis(self, name, idx):
         ai = getattr(self, f"_{name}_ax").itemData(idx)
         self._axis_idx[name] = ai if ai is not None else -1
+        self._save_settings()
 
-    def _close_unused(self):
-        """Ask the worker to close devices no tracked axis references."""
+    def _used_devices(self):
+        """The pool indices the worker must poll: the four controls,
+        plus any device an *action* has one of its axes bound to --
+        that's where a button on such a device gets its rising-edge
+        events.  (Button bindings on other devices are matched by
+        identity, and are opened when that device next appears.)"""
         used = {d for d in self._dev_idx.values()
                 if 0 <= d < len(self._pool)}
-        self._worker.set_used(used)
+        return used
+
+    # -- button bindings --------------------------------------------------
+    def _current_action(self):
+        """The action the dropdown has selected."""
+        return self._action_box.currentText()
+
+    def _on_action_sel(self, idx):
+        self._bind_action = None    # switching action exits bind mode
+        self._update_bind_label()
+
+    def _on_set(self):
+        action = self._current_action()
+        if self._bind_action == action:
+            # Cancel: leave the old binding in place.
+            self._bind_action = None
+        else:
+            self._bind_action = action
+        self._update_bind_label()
+
+    def _on_clear(self):
+        self._bindings[self._current_action()] = None
+        self._bind_action = None
+        self._update_bind_label()
+        self._save_settings()
+
+    def _update_bind_label(self):
+        """One dropdown of actions; the label and Set/Clear beside it
+        show (or arm) the binding for the selected action."""
+        action = self._current_action()
+        b = self._bindings.get(action)
+        if b:
+            self._bind_label.setText(f"{b['device_name']} — {b['button_name']}")
+        else:
+            self._bind_label.setText("")
+        if self._bind_action == action:
+            self._set_btn.setText("Cancel")
+            self._bind_label.setText("(press a button...)")
+        else:
+            self._set_btn.setText("Set")
+
+    def _on_button_pressed(self, di, bi):
+        """A button rose on a polled device.  While binding, it becomes
+        the selected action's binding; otherwise it selects whatever
+        action is bound to it, if any."""
+        if di < 0 or di >= len(self._pool):
+            return
+        pool = self._pool[di]
+        if bi >= len(pool["buttons"]):
+            return
+        btn = pool["buttons"][bi]
+        device_id = pool["identity"]
+        button_id = btn["usage"]
+        device_name = pool["name"]
+        button_name = btn["name"]
+        print(f"[hp] button: {device_name} / {button_name}")
+        if self._bind_action is not None:
+            self._bindings[self._bind_action] = {
+                "device_id": device_id, "button_id": button_id,
+                "device_name": device_name, "button_name": button_name}
+            self._bind_action = None
+            self._update_bind_label()
+            self._save_settings()
+            return
+        for action, b in self._bindings.items():
+            if (b and b["device_id"] == device_id
+                    and b["button_id"] == button_id):
+                idx = self._action_box.findText(action)
+                if idx >= 0:
+                    self._action_box.setCurrentIndex(idx)
+                return
+
+    # -- persistence ------------------------------------------------------
+    def _settings_path(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "controls.json")
+
+    def _load_settings(self):
+        """Reload axis maps and button bindings.  The on-disk format
+        addresses devices and axes/buttons by *name* (device identity +
+        axis/button usage name), never by pool index -- indices shift
+        between rescans."""
+        try:
+            with open(self._settings_path(), "r") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return
+        except Exception as e:                    # noqa: BLE001
+            print(f"[hp] could not read controls.json: {e}")
+            return
+        self._bindings = {a: None for a in self.ACTIONS}
+        for action, b in (data.get("bindings") or {}).items():
+            if (action in self._bindings and isinstance(b, dict)
+                    and "device_id" in b and "button_id" in b):
+                self._bindings[action] = {
+                    "device_id": b["device_id"],
+                    "button_id": int(b["button_id"]),
+                    "device_name": b.get("device_name", ""),
+                    "button_name": b.get("button_name", "")}
+        # axis maps resolve against the pool on _on_pool_ready; stash
+        # the pending map here and match by device identity + axis name.
+        self._pending_axis = {}
+        for name, m in (data.get("axis_map") or {}).items():
+            if (name in self.TRACKED and isinstance(m, dict)
+                    and "device_id" in m and "axis_name" in m):
+                self._pending_axis[name] = m
+
+    def _save_settings(self):
+        data = {"bindings": {}, "axis_map": {}}
+        for action, b in self._bindings.items():
+            if b:
+                data["bindings"][action] = b
+        for name in self.TRACKED:
+            di = self._dev_idx.get(name, -1)
+            ai = self._axis_idx.get(name, -1)
+            if (0 <= di < len(self._pool) and 0 <= ai < len(self._pool[di]["axes"])):
+                axis = self._pool[di]["axes"][ai]
+                data["axis_map"][name] = {
+                    "device_id": self._pool[di]["identity"],
+                    "axis_name": axis["name"]}
+        try:
+            with open(self._settings_path(), "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:                    # noqa: BLE001
+            print(f"[hp] could not write controls.json: {e}")
 
     def _update_displays(self):
         def val(name):
@@ -914,6 +1131,7 @@ def hid_controls(h):
     m = macrt.d.system.mem
     a4 = h.regs()["a4"] & m.mask
     base = m.r32((h.regs()["a5"] - 0x6c2e) & m.mask) & m.mask
+
     # Roll axis (buffer+2): stick X.  The game reads pitch at +3 next;
     # the elevator mapping is applied in the same write path below.
     m.w8((a4 + 2) & m.mask, _axis_byte(_hid_axes.get("aileron")))

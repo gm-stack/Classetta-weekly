@@ -740,9 +740,11 @@ def test_the_desk_is_the_whole_desktop_and_painted_on_every_screen(qapp):
 
 
 def test_each_screen_shows_its_own_colour_table(qapp):
-    """A program can program each screen's card separately (F/A-18's
-    Panorama mode gives each screen its own pmTable): a change to one
-    screen's colours changes that screen's table and no other's."""
+    """A program can program a side screen's card with its own SetEntries:
+    a change to that screen's colours changes that screen's table and no
+    other's -- it doesn't go through the main screen's palette, so it
+    doesn't reach the others (the main screen's palette does, see
+    test_the_main_palette_reaches_the_side_screens)."""
     g = screens3()
     system = g.system
     main, second = system.devices.screens[0], system.devices.screens[1]
@@ -760,6 +762,32 @@ def test_each_screen_shows_its_own_colour_table(qapp):
     # Each screen's card still holds its own table, by its own seed.
     assert system.devices.device_table(second)[entry] == 0xFFFF0000
     assert system.devices.device_table(main)[entry] == before
+
+
+def test_the_main_palette_reaches_the_side_screens(qapp):
+    """The hardware shows one palette, the main screen's: a change to the
+    main screen's colours reaches every screen, as the Panorama game's
+    palette -- the Palette Manager's, on the main device -- reaches all of
+    them."""
+    g = screens3()
+    system = g.system
+    main = system.devices.main
+    entry = 5
+    before_next = [s.table[entry + 1] for s in system.screen.extra]
+    with system.lock:
+        g("SetGDevice", main)
+        g("SetEntries", entry, 0, specs(g, (0, 0xFFFF, 0, 0)))     # red, on the main screen
+        system.screen.look()
+    # The main screen's entry, red now ...
+    assert system.screen.bits.table[entry] == 0xFFFF0000
+    # ... and the main screen's table has reached the sides' cards, in
+    # guest memory: each side's table, by its own seed, shows the red.
+    for i, gdh in enumerate(system.devices.screens[1:]):
+        assert system.devices.device_table(gdh)[entry] == 0xFFFF0000
+        assert system.screen.extra[i].table[entry] == 0xFFFF0000
+    # The mirror set only the main screen's table's bytes: the sides'
+    # other entries are what they were.
+    assert [s.table[entry + 1] for s in system.screen.extra] == before_next
 
 
 def test_a_program_writing_in_an_extra_buffer_shows_there(harness):

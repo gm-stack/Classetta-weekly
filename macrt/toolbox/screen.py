@@ -322,10 +322,12 @@ class Screen:
     def _recolor(self) -> None:
         """If any screen's colour table has changed since the last look,
         show its buffer again in the new colours: the windows and the
-        desk on the main screen, and each other screen's host window.  A
-        program can program each screen's card separately (F/A-18's
-        Panorama mode gives each screen its own pmTable), so each is
-        looked at in its own table."""
+        desk on the main screen, and each other screen's host window.  The
+        main screen's palette the others' tables follow (the hardware shows
+        one palette, the main screen's: see Devices.changed), and a program
+        can still set a side screen's own table (its SetEntries), so each
+        screen is looked at when its own table changes, which the main
+        screen's palette changing does, for all of them."""
         if self.devices is None:
             return
         table = self.devices.device_table(self.devices.main)

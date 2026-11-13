@@ -496,10 +496,11 @@ class Devices:
         """A screen's colours, by pixel value, as its own colour table has
         them now: each unlike any other (see apart), where it's the main
         screen's.  Each screen has its own table, its own seed, and its own
-        cache of it: a card's CLUT is programmed on its own card's driver
-        (the Panorama game writes each screen's pmTable itself), so a
-        change to one screen's colours changes that screen's table and no
-        other's."""
+        cache of it: what a screen's card shows is its table's colours, and
+        a program's SetEntries to that screen's device changes that screen's
+        table and no other's.  The main screen's palette the other screens'
+        tables follow: the hardware shows one palette, the main screen's
+        (see changed)."""
         gdh &= self.mem.addr_mask
         mem = self.mem                  # read as pixmap() would, without the views
         gd = deref(mem, gdh)
@@ -537,8 +538,34 @@ class Devices:
     def changed(self) -> None:
         """The main screen's colours have changed, whether or not its
         table's seed has (RestoreEntries keeps it), or which of them are
-        reserved has."""
+        reserved has: the hardware shows one palette, the main screen's, and
+        every screen shows in it, so the other screens' colour tables are
+        set to it and looked at again (see _recolor)."""
         self._tables[self.main & self.mem.addr_mask] = (-1, [])
+        if self.depth > 8:
+            return                     # a direct device has no palette to share
+        mem = self.mem
+        pm = self.pixmap(self.main)
+        h = pm.pm_table if pm is not None else 0
+        p = deref(mem, h)
+        if p:
+            data = mem.read(p, self.heap.handle_size(h))
+            for gdh in self.screens[1:]:
+                self._mirror(gdh, data)
+
+    def _mirror(self, gdh: int, data: bytes) -> None:
+        """One of the other screens' colour table set to data -- the main
+        screen's table as it is now: the palette the hardware shows is one
+        and every screen shows in it, so what the main screen's driver wrote
+        is what that screen's card shows.  Its cache goes with it, so the
+        screen is looked at in the new colours.  Skipped when its table
+        isn't the data's size: a depth it hasn't caught up to yet."""
+        gdh &= self.mem.addr_mask
+        self._tables[gdh] = (-1, [])
+        mem, heap = self.mem, self.heap
+        ct = PixMap(mem, deref(mem, GDevice(mem, deref(mem, gdh)).pmap)).pm_table
+        if ct and heap.handle_size(ct) == len(data):
+            mem.write(heap.deref(ct), data)
 
     def matching(self) -> list[int]:
         """The main screen's colours as a colour to draw in is matched to
